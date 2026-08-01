@@ -1,15 +1,19 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import json
+import re
+from urllib.parse import quote
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from sqlalchemy import desc, func, inspect, select, text
 from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .database import Base, SessionLocal, engine, get_session
 from .dependencies import current_user, require
+from .excel_export import build_schema_workbook
 from .models import CollectionJob, CollectionRun, DataSource, Menu, Permission, Role, SchemaSnapshot, User
 from .collector import test_source
 from .scheduler import execute_job, start_scheduler, stop_scheduler, sync_jobs
@@ -217,6 +221,22 @@ def metadata(session: Session = Depends(get_session), _: User = Depends(require(
             result.append({"id": item.id, "data_source_id": item.data_source_id, "run_id": item.run_id, "captured_at": item.captured_at, "fingerprint": item.fingerprint, "payload": item.payload})
             seen.add(item.data_source_id)
     return result
+
+
+@app.get("/api/metadata/{snapshot_id}/export.xlsx")
+def export_metadata(snapshot_id: int, session: Session = Depends(get_session), _: User = Depends(require("metadata:read"))):
+    snapshot = session.get(SchemaSnapshot, snapshot_id)
+    if not snapshot:
+        raise HTTPException(404, "수집된 스키마 정보를 찾을 수 없습니다.")
+    content = build_schema_workbook(snapshot.payload, snapshot.captured_at, snapshot.fingerprint)
+    source_name = re.sub(r"[^0-9A-Za-z가-힣_-]+", "_", str(snapshot.payload.get("source") or "schema")).strip("_") or "schema"
+    filename = f"MetaVault_{source_name}_{snapshot.captured_at:%Y%m%d_%H%M%S}.xlsx"
+    fallback = f"metavault_schema_{snapshot.id}.xlsx"
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename)}"},
+    )
 
 
 @app.get("/api/admin/users")
