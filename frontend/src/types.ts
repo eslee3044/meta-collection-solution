@@ -1,0 +1,8 @@
+export type User = { id: number; email: string; name: string; is_active: boolean; roles: string[]; permissions: string[]; menus: string[] }
+export type Source = { id: number; name: string; db_type: string; host: string; port?: number; database: string; username: string; options: Record<string, unknown>; ssh_enabled: boolean; ssh_host?: string; ssh_port: number; ssh_username?: string; ssh_auth_type?: string; status: string; last_tested_at?: string; created_at: string }
+export type Job = { id: number; name: string; data_source_id: number; schedule_type: string; cron: string; interval_minutes?: number; schemas: string[]; is_active: boolean; next_run_at?: string; created_at: string }
+export type Run = { id: number; job_id: number; status: string; started_at: string; finished_at?: string; object_count: number; error_message?: string }
+export type Role = { id: number; name: string; description: string; permissions: number[]; menus: number[] }
+export type Permission = { id: number; code: string; description: string }
+export type Menu = { id: number; code: string; label: string; path: string; icon: string; order: number }
+
