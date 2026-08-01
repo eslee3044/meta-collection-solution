@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import json
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -81,6 +82,21 @@ def apply_source(item: DataSource, payload: DataSourceIn) -> None:
         setattr(item, field, getattr(payload, field))
     if payload.password is not None:
         item.secret_encrypted = encrypt_json({"password": payload.password})
+    if payload.service_account_json is not None:
+        try:
+            credentials = json.loads(payload.service_account_json)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(400, "서비스 계정 JSON 형식이 올바르지 않습니다.") from exc
+        if not isinstance(credentials, dict) or not credentials.get("project_id") or not credentials.get("private_key"):
+            raise HTTPException(400, "서비스 계정 JSON에 project_id와 private_key가 필요합니다.")
+        item.secret_encrypted = encrypt_json({"service_account": credentials})
+    if payload.db_type == "bigquery":
+        if not item.secret_encrypted:
+            raise HTTPException(400, "BigQuery 서비스 계정 JSON을 입력하세요.")
+        item.host = ""
+        item.port = None
+        item.username = ""
+        item.ssh_enabled = False
     if payload.ssh_password is not None or payload.ssh_private_key is not None:
         item.ssh_secret_encrypted = encrypt_json({
             "password": payload.ssh_password,

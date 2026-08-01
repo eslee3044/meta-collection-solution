@@ -2,9 +2,24 @@ from pathlib import Path
 
 from sqlalchemy import create_engine, text
 
-from app.collector import collect_schema
+from app.collector import _url, collect_schema
 from app.models import DataSource
 from app.scheduler import apply_storage_growth
+from app.security import encrypt_json
+
+
+def test_db2_and_bigquery_urls():
+    db2 = DataSource(
+        name="db2", db_type="db2", host="db2.internal", port=50000,
+        database="WAREHOUSE", username="collector", secret_encrypted=encrypt_json({"password": "p@ss"}), options={},
+    )
+    assert _url(db2, db2.host, db2.port) == "db2+ibm_db://collector:p%40ss@db2.internal:50000/WAREHOUSE"
+
+    bigquery = DataSource(
+        name="bigquery", db_type="bigquery", database="sample-project",
+        host="", username="", options={"dataset": "analytics", "location": "US"},
+    )
+    assert _url(bigquery, "", None) == "bigquery://sample-project/analytics"
 
 
 def test_sqlite_schema_collection(tmp_path: Path):

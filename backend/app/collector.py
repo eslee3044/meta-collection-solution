@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,7 +16,7 @@ from .models import DataSource
 from .security import decrypt_json
 
 
-DEFAULT_PORTS = {"postgresql": 5432, "mysql": 3306, "mariadb": 3306, "mssql": 1433, "oracle": 1521}
+DEFAULT_PORTS = {"postgresql": 5432, "mysql": 3306, "mariadb": 3306, "mssql": 1433, "oracle": 1521, "db2": 50000}
 
 
 def _safe(call, default):
@@ -32,12 +33,16 @@ def _url(source: DataSource, host: str, port: int | None) -> str:
     database = source.database
     if source.db_type == "sqlite":
         return f"sqlite:///{database}"
+    if source.db_type == "bigquery":
+        dataset = (source.options or {}).get("dataset", "")
+        return f"bigquery://{database}/{dataset}" if dataset else f"bigquery://{database}"
     drivers = {
         "postgresql": "postgresql+psycopg",
         "mysql": "mysql+pymysql",
         "mariadb": "mysql+pymysql",
         "mssql": "mssql+pyodbc",
         "oracle": "oracle+oracledb",
+        "db2": "db2+ibm_db",
     }
     if source.db_type == "mssql":
         driver = quote_plus(source.options.get("driver", "ODBC Driver 18 for SQL Server"))
@@ -51,6 +56,7 @@ def _url(source: DataSource, host: str, port: int | None) -> str:
 @contextmanager
 def source_engine(source: DataSource) -> Iterator[Engine]:
     tunnel = None
+    engine: Engine | None = None
     key_file: Path | None = None
     host, port = source.host, source.port or DEFAULT_PORTS.get(source.db_type)
     try:
@@ -74,10 +80,19 @@ def source_engine(source: DataSource) -> Iterator[Engine]:
             tunnel.start()
             host, port = "127.0.0.1", tunnel.local_bind_port
         options = source.options or {}
-        engine = create_engine(_url(source, host, port), pool_pre_ping=True, connect_args=options.get("connect_args", {}))
+        engine_options = {"pool_pre_ping": True, "connect_args": options.get("connect_args", {})}
+        if source.db_type == "bigquery":
+            secret = decrypt_json(source.secret_encrypted)
+            credentials = secret.get("service_account")
+            if not credentials:
+                raise ValueError("BigQuery 서비스 계정 JSON이 등록되지 않았습니다.")
+            engine_options["credentials_info"] = credentials
+            engine_options["location"] = options.get("location", "US")
+        engine = create_engine(_url(source, host, port), **engine_options)
         yield engine
-        engine.dispose()
     finally:
+        if engine:
+            engine.dispose()
         if tunnel:
             tunnel.stop()
         if key_file and key_file.exists():
@@ -90,6 +105,20 @@ def test_source(source: DataSource) -> None:
 
 
 def _storage_metrics(connection: Connection, source: DataSource, schema_name: str) -> dict[str, dict]:
+    if source.db_type == "bigquery":
+        project = source.database
+        location = str((source.options or {}).get("location", "US")).lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{4,61}[a-z0-9]", project) or not re.fullmatch(r"[a-z0-9-]+", location):
+            raise ValueError("BigQuery 프로젝트 ID 또는 리전 형식이 올바르지 않습니다.")
+        query = f"""
+            SELECT table_name, total_logical_bytes AS data_bytes, 0 AS index_bytes,
+                   total_logical_bytes AS total_bytes, total_rows AS row_estimate
+            FROM `{project}`.`region-{location}`.INFORMATION_SCHEMA.TABLE_STORAGE
+            WHERE table_schema = :schema AND deleted = FALSE AND table_type = 'BASE TABLE'
+        """
+        rows = connection.execute(text(query), {"schema": schema_name}).mappings()
+        return _rows_to_storage(rows)
+
     queries = {
         "postgresql": """
             SELECT c.relname AS table_name, pg_relation_size(c.oid) AS data_bytes,
@@ -157,9 +186,23 @@ def _storage_metrics(connection: Connection, source: DataSource, schema_name: st
             WHERE m.type IN ('table', 'index') AND m.tbl_name NOT LIKE 'sqlite_%'
             GROUP BY m.tbl_name
         """,
+        "db2": """
+            SELECT t.TABNAME AS table_name,
+                   CASE WHEN t.NPAGES >= 0 THEN t.NPAGES * COALESCE(s.PAGESIZE, 4096) ELSE 0 END AS data_bytes,
+                   0 AS index_bytes,
+                   CASE WHEN t.FPAGES >= 0 THEN t.FPAGES * COALESCE(s.PAGESIZE, 4096) ELSE 0 END AS total_bytes,
+                   CASE WHEN t.CARD >= 0 THEN t.CARD ELSE NULL END AS row_estimate
+            FROM SYSCAT.TABLES t
+            LEFT JOIN SYSCAT.TABLESPACES s ON s.TBSPACE = t.TBSPACE
+            WHERE t.TABSCHEMA = :schema AND t.TYPE = 'T'
+        """,
     }
     query = queries[source.db_type]
     rows = connection.execute(text(query), {"schema": schema_name}).mappings()
+    return _rows_to_storage(rows)
+
+
+def _rows_to_storage(rows) -> dict[str, dict]:
     return {
         str(row["table_name"]): {
             "data_bytes": int(row["data_bytes"] or 0),
@@ -179,7 +222,12 @@ def collect_schema(
     with source_engine(source) as engine, engine.connect() as connection:
         inspector = inspect(engine)
         available = inspector.get_schema_names()
-        schemas = selected_schemas or [name for name in available if name not in {"information_schema", "pg_catalog", "sys"}]
+        configured_dataset = (source.options or {}).get("dataset") if source.db_type == "bigquery" else None
+        schemas = selected_schemas or ([configured_dataset] if configured_dataset else [
+            name for name in available
+            if name.lower() not in {"information_schema", "pg_catalog", "sys"}
+            and not (source.db_type == "db2" and name.upper().startswith("SYS"))
+        ])
         result = {
             "source": source.name,
             "db_type": source.db_type,
@@ -196,9 +244,9 @@ def collect_schema(
                     "name": table_name,
                     "comment": (_safe(lambda: inspector.get_table_comment(table_name, schema=schema_name), {}) or {}).get("text"),
                     "columns": inspector.get_columns(table_name, schema=schema_name),
-                    "primary_key": inspector.get_pk_constraint(table_name, schema=schema_name),
-                    "foreign_keys": inspector.get_foreign_keys(table_name, schema=schema_name),
-                    "indexes": inspector.get_indexes(table_name, schema=schema_name),
+                    "primary_key": _safe(lambda: inspector.get_pk_constraint(table_name, schema=schema_name), {}),
+                    "foreign_keys": _safe(lambda: inspector.get_foreign_keys(table_name, schema=schema_name), []),
+                    "indexes": _safe(lambda: inspector.get_indexes(table_name, schema=schema_name), []),
                     "unique_constraints": _safe(lambda: inspector.get_unique_constraints(table_name, schema=schema_name), []),
                 }
                 if include_storage:

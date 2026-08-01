@@ -4,7 +4,7 @@
 
 ## 포함 기능
 
-- PostgreSQL, MySQL, MariaDB, SQL Server, Oracle, SQLite 연결 모델
+- PostgreSQL, MySQL, MariaDB, SQL Server, Oracle, SQLite, IBM Db2, Google BigQuery 연결 모델
 - DB 비밀번호 인증 및 SSH 비밀번호/PEM 개인키 터널
 - 접속 비밀번호와 SSH 키의 Fernet 암호화 저장
 - 스키마, 테이블, 뷰, 컬럼, PK/FK, 인덱스, 유니크 제약 수집
@@ -41,6 +41,9 @@ Docker가 설치되어 있다면 저장소 루트에서 `docker compose up --bui
 - PostgreSQL과 MySQL/MariaDB 드라이버는 기본 설치됩니다.
 - SQL Server는 `pip install -e ".[mssql]"` 및 Microsoft ODBC Driver 18 설치가 필요합니다.
 - Oracle은 `pip install -e ".[oracle]"`로 thin 드라이버를 추가합니다.
+- IBM Db2와 Google BigQuery 드라이버는 기본 설치됩니다. BigQuery는 프로젝트 ID, 데이터셋, 리전과 서비스 계정 JSON을 사용합니다.
+- BigQuery 기본 메타/스토리지 수집에는 프로젝트의 `BigQuery Metadata Viewer`와 쿼리 실행 권한이 필요합니다. 스토리지 값은 `TABLE_STORAGE`의 논리 바이트를 사용합니다.
+- Db2 용량과 예상 행 수는 카탈로그 통계 기반이므로 정확한 값이 필요하면 대상 DB에서 `RUNSTATS`를 최신 상태로 유지하세요.
 
 ## 검증
 

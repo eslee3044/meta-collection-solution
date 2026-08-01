@@ -28,12 +28,13 @@ class LoginResponse(BaseModel):
 
 class DataSourceIn(BaseModel):
     name: str = Field(min_length=2, max_length=120)
-    db_type: Literal["postgresql", "mysql", "mariadb", "mssql", "oracle", "sqlite"]
+    db_type: Literal["postgresql", "mysql", "mariadb", "mssql", "oracle", "sqlite", "db2", "bigquery"]
     host: str = "localhost"
     port: int | None = None
     database: str = ""
     username: str = ""
     password: str | None = None
+    service_account_json: str | None = None
     options: dict[str, Any] = {}
     ssh_enabled: bool = False
     ssh_host: str | None = None
