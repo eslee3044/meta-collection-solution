@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, inspect, select, text
 from sqlalchemy.orm import Session
 
 from .config import get_settings
@@ -29,6 +29,11 @@ def user_out(user: User) -> UserOut:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(engine)
+    columns = {column["name"] for column in inspect(engine).get_columns("collection_jobs")}
+    if "collect_storage" not in columns:
+        default = "FALSE" if engine.dialect.name == "postgresql" else "0"
+        with engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE collection_jobs ADD COLUMN collect_storage BOOLEAN NOT NULL DEFAULT {default}"))
     with SessionLocal() as session:
         seed(session)
     start_scheduler()

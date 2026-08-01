@@ -7,6 +7,7 @@ from typing import Iterator
 from urllib.parse import quote_plus
 
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Engine
 from sshtunnel import SSHTunnelForwarder
 
@@ -88,15 +89,108 @@ def test_source(source: DataSource) -> None:
         connection.execute(text("SELECT 1"))
 
 
-def collect_schema(source: DataSource, selected_schemas: list[str] | None = None) -> tuple[dict, int, str]:
-    with source_engine(source) as engine:
+def _storage_metrics(connection: Connection, source: DataSource, schema_name: str) -> dict[str, dict]:
+    queries = {
+        "postgresql": """
+            SELECT c.relname AS table_name, pg_relation_size(c.oid) AS data_bytes,
+                   pg_indexes_size(c.oid) AS index_bytes, pg_total_relation_size(c.oid) AS total_bytes,
+                   CAST(c.reltuples AS BIGINT) AS row_estimate
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = :schema AND c.relkind IN ('r', 'p')
+        """,
+        "mysql": """
+            SELECT TABLE_NAME AS table_name, COALESCE(DATA_LENGTH, 0) AS data_bytes,
+                   COALESCE(INDEX_LENGTH, 0) AS index_bytes,
+                   COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0) AS total_bytes,
+                   TABLE_ROWS AS row_estimate
+            FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA = :schema AND TABLE_TYPE = 'BASE TABLE'
+        """,
+        "mariadb": """
+            SELECT TABLE_NAME AS table_name, COALESCE(DATA_LENGTH, 0) AS data_bytes,
+                   COALESCE(INDEX_LENGTH, 0) AS index_bytes,
+                   COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0) AS total_bytes,
+                   TABLE_ROWS AS row_estimate
+            FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA = :schema AND TABLE_TYPE = 'BASE TABLE'
+        """,
+        "mssql": """
+            SELECT t.name AS table_name,
+                   SUM((p.in_row_data_page_count + p.lob_used_page_count + p.row_overflow_used_page_count) * 8192) AS data_bytes,
+                   SUM((p.used_page_count - p.in_row_data_page_count - p.lob_used_page_count - p.row_overflow_used_page_count) * 8192) AS index_bytes,
+                   SUM(p.reserved_page_count * 8192) AS total_bytes,
+                   SUM(p.row_count) AS row_estimate
+            FROM sys.dm_db_partition_stats p
+            JOIN sys.tables t ON t.object_id = p.object_id
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            WHERE s.name = :schema
+            GROUP BY t.name
+        """,
+        "oracle": """
+            SELECT t.table_name,
+                   COALESCE(ds.data_bytes, 0) AS data_bytes,
+                   COALESCE(ix.index_bytes, 0) AS index_bytes,
+                   COALESCE(ds.data_bytes, 0) + COALESCE(ix.index_bytes, 0) AS total_bytes,
+                   t.num_rows AS row_estimate
+            FROM all_tables t
+            LEFT JOIN (
+              SELECT owner, segment_name, SUM(bytes) AS data_bytes FROM all_segments
+              WHERE segment_type LIKE 'TABLE%' GROUP BY owner, segment_name
+            ) ds ON ds.owner = t.owner AND ds.segment_name = t.table_name
+            LEFT JOIN (
+              SELECT i.table_owner, i.table_name, SUM(s.bytes) AS index_bytes
+              FROM all_indexes i JOIN all_segments s ON s.owner = i.owner AND s.segment_name = i.index_name
+              WHERE s.segment_type LIKE 'INDEX%' GROUP BY i.table_owner, i.table_name
+            ) ix ON ix.table_owner = t.owner AND ix.table_name = t.table_name
+            WHERE t.owner = :schema
+        """,
+        "sqlite": """
+            WITH object_sizes AS (
+              SELECT name, SUM(pgsize) AS bytes FROM dbstat GROUP BY name
+            )
+            SELECT m.tbl_name AS table_name,
+                   SUM(CASE WHEN m.type = 'table' THEN COALESCE(o.bytes, 0) ELSE 0 END) AS data_bytes,
+                   SUM(CASE WHEN m.type = 'index' THEN COALESCE(o.bytes, 0) ELSE 0 END) AS index_bytes,
+                   SUM(COALESCE(o.bytes, 0)) AS total_bytes,
+                   NULL AS row_estimate
+            FROM sqlite_master m JOIN object_sizes o ON o.name = m.name
+            WHERE m.type IN ('table', 'index') AND m.tbl_name NOT LIKE 'sqlite_%'
+            GROUP BY m.tbl_name
+        """,
+    }
+    query = queries[source.db_type]
+    rows = connection.execute(text(query), {"schema": schema_name}).mappings()
+    return {
+        str(row["table_name"]): {
+            "data_bytes": int(row["data_bytes"] or 0),
+            "index_bytes": int(row["index_bytes"] or 0),
+            "total_bytes": int(row["total_bytes"] or 0),
+            "row_estimate": int(row["row_estimate"]) if row["row_estimate"] is not None else None,
+        }
+        for row in rows
+    }
+
+
+def collect_schema(
+    source: DataSource,
+    selected_schemas: list[str] | None = None,
+    include_storage: bool = False,
+) -> tuple[dict, int, str]:
+    with source_engine(source) as engine, engine.connect() as connection:
         inspector = inspect(engine)
         available = inspector.get_schema_names()
         schemas = selected_schemas or [name for name in available if name not in {"information_schema", "pg_catalog", "sys"}]
-        result = {"source": source.name, "db_type": source.db_type, "database": source.database, "schemas": []}
+        result = {
+            "source": source.name,
+            "db_type": source.db_type,
+            "database": source.database,
+            "collection_options": {"basic": True, "storage_growth": include_storage},
+            "schemas": [],
+        }
         count = 0
         for schema_name in schemas:
             schema = {"name": schema_name, "tables": [], "views": []}
+            storage_metrics = _storage_metrics(connection, source, schema_name) if include_storage else {}
             for table_name in inspector.get_table_names(schema=schema_name):
                 table = {
                     "name": table_name,
@@ -107,6 +201,8 @@ def collect_schema(source: DataSource, selected_schemas: list[str] | None = None
                     "indexes": inspector.get_indexes(table_name, schema=schema_name),
                     "unique_constraints": _safe(lambda: inspector.get_unique_constraints(table_name, schema=schema_name), []),
                 }
+                if include_storage:
+                    table["storage"] = storage_metrics.get(table_name, {"data_bytes": 0, "index_bytes": 0, "total_bytes": 0, "row_estimate": None})
                 for column in table["columns"]:
                     column["type"] = str(column["type"])
                 schema["tables"].append(table)
