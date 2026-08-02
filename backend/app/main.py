@@ -17,7 +17,7 @@ from .excel_export import build_schema_workbook
 from .models import CollectionJob, CollectionRun, DataSource, Menu, Permission, Role, SchemaSnapshot, User
 from .collector import test_source
 from .scheduler import execute_job, start_scheduler, stop_scheduler, sync_jobs
-from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, RoleIn, RunOut, UserIn, UserOut
+from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, PasswordChangeIn, RoleIn, RunOut, UserIn, UserOut
 from .security import create_token, encrypt_json, hash_password, verify_password
 from .seed import seed
 
@@ -67,6 +67,17 @@ def login(payload: LoginRequest, session: Session = Depends(get_session)):
 @app.get("/api/auth/me", response_model=UserOut)
 def me(user: User = Depends(current_user)):
     return user_out(user)
+
+
+@app.post("/api/auth/password")
+def change_password(payload: PasswordChangeIn, session: Session = Depends(get_session), user: User = Depends(current_user)):
+    if not verify_password(payload.current_password, user.password_hash):
+        raise HTTPException(400, "현재 비밀번호가 올바르지 않습니다.")
+    if payload.current_password == payload.new_password:
+        raise HTTPException(400, "새 비밀번호는 현재 비밀번호와 달라야 합니다.")
+    user.password_hash = hash_password(payload.new_password)
+    session.commit()
+    return {"status": "changed"}
 
 
 @app.get("/api/dashboard")
