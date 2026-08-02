@@ -1,0 +1,21 @@
+services:
+  api:
+    build: ./backend
+    environment:
+      METAVAULT_DATABASE_URL: sqlite:////data/metavault.db
+      METAVAULT_SECRET_KEY: ${METAVAULT_SECRET_KEY:-change-this-before-production}
+      METAVAULT_ADMIN_EMAIL: ${METAVAULT_ADMIN_EMAIL:-admin@example.com}
+      METAVAULT_ADMIN_PASSWORD: ${METAVAULT_ADMIN_PASSWORD:-Admin123!}
+      METAVAULT_CORS_ORIGINS: http://localhost:8080
+    volumes:
+      - metavault-data:/data
+    ports:
+      - "8000:8000"
+  web:
+    build: ./frontend
+    depends_on: [api]
+    ports:
+      - "8080:80"
+volumes:
+  metavault-data:
+

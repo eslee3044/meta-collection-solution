@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metavault-api"
+version = "0.1.0"
+description = "Database schema metadata collection and administration API"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "uvicorn[standard]>=0.35,<1",
+  "sqlalchemy>=2.0,<3",
+  "pydantic-settings>=2.10,<3",
+  "cryptography>=45,<47",
+  "apscheduler>=3.11,<4",
+  "sshtunnel>=0.4,<1",
+  "paramiko>=3.5,<5",
+  "psycopg[binary]>=3.2,<4",
+  "pymysql>=1.1,<2",
+  "ibm-db>=3.2,<4",
+  "ibm-db-sa>=0.4,<1",
+  "sqlalchemy-bigquery>=1.12,<2",
+  "google-cloud-bigquery>=3.35,<4",
+  "xlsxwriter>=3.2,<4",
+  "python-multipart>=0.0.20,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.4,<9", "httpx>=0.28,<1"]
+mssql = ["pyodbc>=5.2,<6"]
+oracle = ["oracledb>=3.2,<4"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
