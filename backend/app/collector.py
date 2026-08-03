@@ -216,6 +216,42 @@ def _rows_to_storage(rows) -> dict[str, dict]:
     }
 
 
+def _query_rows(connection: Connection, query: str, params: dict[str, str]) -> list[dict]:
+    try:
+        return [dict(row) for row in connection.execute(text(query), params).mappings()]
+    except Exception:
+        return []
+
+
+def _collect_procedures(connection: Connection, source: DataSource, schema_name: str) -> list[dict]:
+    queries = {
+        "postgresql": "SELECT p.proname AS name, pg_get_function_identity_arguments(p.oid) AS arguments, pg_get_function_result(p.oid) AS return_type, pg_get_functiondef(p.oid) AS definition, CASE WHEN p.prokind = 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS routine_type FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = :schema AND p.prokind IN ('f', 'p')",
+        "mysql": "SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS routine_type, DTD_IDENTIFIER AS return_type, ROUTINE_DEFINITION AS definition FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = :schema",
+        "mariadb": "SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS routine_type, DTD_IDENTIFIER AS return_type, ROUTINE_DEFINITION AS definition FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = :schema",
+        "mssql": "SELECT o.name, o.type_desc AS routine_type, OBJECT_DEFINITION(o.object_id) AS definition FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE s.name = :schema AND o.type IN ('P', 'PC', 'FN', 'IF', 'TF')",
+        "oracle": "SELECT object_name AS name, object_type AS routine_type FROM all_procedures WHERE owner = :schema AND object_type IN ('PROCEDURE', 'FUNCTION', 'PACKAGE')",
+        "db2": "SELECT ROUTINENAME AS name, ROUTINETYPE AS routine_type, TEXT AS definition FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = :schema",
+    }
+    if source.db_type in {"sqlite", "bigquery"}:
+        return []
+    return _query_rows(connection, queries[source.db_type], {"schema": schema_name})
+
+
+def _collect_select_permissions(connection: Connection, source: DataSource, schema_name: str) -> dict[str, dict]:
+    if source.db_type == "sqlite":
+        return {"*": {"select": True, "privileges": ["SELECT"], "checked_as": source.username or "sqlite"}}
+    queries = {
+        "postgresql": "SELECT table_name AS name FROM information_schema.role_table_grants WHERE table_schema = :schema AND privilege_type = 'SELECT' AND grantee = CURRENT_USER",
+        "mysql": "SELECT TABLE_NAME AS name FROM information_schema.TABLE_PRIVILEGES WHERE TABLE_SCHEMA = :schema AND PRIVILEGE_TYPE = 'SELECT' AND GRANTEE = CONCAT(\"'\", CURRENT_USER(), \"'\")",
+        "mariadb": "SELECT TABLE_NAME AS name FROM information_schema.TABLE_PRIVILEGES WHERE TABLE_SCHEMA = :schema AND PRIVILEGE_TYPE = 'SELECT' AND GRANTEE = CONCAT(\"'\", CURRENT_USER(), \"'\")",
+        "mssql": "SELECT o.name FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE s.name = :schema AND o.type IN ('U', 'V') AND HAS_PERMS_BY_NAME(QUOTENAME(s.name) + '.' + QUOTENAME(o.name), 'OBJECT', 'SELECT') = 1",
+        "oracle": "SELECT table_name AS name FROM all_tab_privs WHERE owner = :schema AND privilege = 'SELECT' AND (grantee = USER OR grantee = 'PUBLIC') UNION SELECT table_name AS name FROM all_tables WHERE owner = :schema AND owner = USER UNION SELECT view_name AS name FROM all_views WHERE owner = :schema AND owner = USER",
+        "db2": "SELECT TABNAME AS name FROM SYSCAT.TABAUTH WHERE TABSCHEMA = :schema AND SELECTAUTH IN ('Y', 'G', 'A') AND (GRANTEE = CURRENT USER OR GRANTEETYPE = 'P')",
+    }
+    rows = _query_rows(connection, queries[source.db_type], {"schema": schema_name})
+    return {row["name"]: {"select": True, "privileges": ["SELECT"], "checked_as": source.username or "current_user"} for row in rows}
+
+
 def collect_schema(
     source: DataSource,
     selected_schemas: list[str] | None = None,
@@ -240,7 +276,8 @@ def collect_schema(
         }
         count = 0
         for schema_name in schemas:
-            schema = {"name": schema_name, "tables": [], "views": []}
+            schema = {"name": schema_name, "tables": [], "views": [], "procedures": _collect_procedures(connection, source, schema_name)}
+            permissions = _collect_select_permissions(connection, source, schema_name)
             storage_metrics = _storage_metrics(connection, source, schema_name) if include_storage else {}
             for table_name in inspector.get_table_names(schema=schema_name):
                 table = {
@@ -251,6 +288,7 @@ def collect_schema(
                     "foreign_keys": _safe(lambda: inspector.get_foreign_keys(table_name, schema=schema_name), []),
                     "indexes": _safe(lambda: inspector.get_indexes(table_name, schema=schema_name), []),
                     "unique_constraints": _safe(lambda: inspector.get_unique_constraints(table_name, schema=schema_name), []),
+                    "permissions": permissions.get(table_name, permissions.get("*", {"select": False, "privileges": [], "checked_as": source.username or "current_user"})),
                 }
                 if include_storage:
                     table["storage"] = storage_metrics.get(table_name, {"data_bytes": 0, "index_bytes": 0, "total_bytes": 0, "row_estimate": None})
@@ -259,8 +297,9 @@ def collect_schema(
                 schema["tables"].append(table)
                 count += 1
             for view_name in inspector.get_view_names(schema=schema_name):
-                schema["views"].append({"name": view_name, "definition": inspector.get_view_definition(view_name, schema=schema_name)})
+                schema["views"].append({"name": view_name, "definition": inspector.get_view_definition(view_name, schema=schema_name), "permissions": permissions.get(view_name, permissions.get("*", {"select": False, "privileges": [], "checked_as": source.username or "current_user"}))})
                 count += 1
+            count += len(schema["procedures"])
             result["schemas"].append(schema)
     raw = json.dumps(result, sort_keys=True, default=str).encode()
     return result, count, hashlib.sha256(raw).hexdigest()

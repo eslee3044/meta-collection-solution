@@ -15,15 +15,19 @@ def test_sqlite_schema_collection(tmp_path: Path):
         connection.execute(text("CREATE TABLE teams (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE)"))
         connection.execute(text("CREATE TABLE members (id INTEGER PRIMARY KEY, team_id INTEGER REFERENCES teams(id), email TEXT)"))
         connection.execute(text("CREATE INDEX ix_members_email ON members(email)"))
+        connection.execute(text("CREATE VIEW member_view AS SELECT id, email FROM members"))
 
     source = DataSource(name="sample", db_type="sqlite", database=str(db_path), host="", username="")
     payload, count, fingerprint = collect_schema(source)
 
-    assert count == 2
+    assert count == 3
     assert len(fingerprint) == 64
     tables = {table["name"]: table for schema in payload["schemas"] for table in schema["tables"]}
     assert set(tables) == {"teams", "members"}
     assert any(fk["referred_table"] == "teams" for fk in tables["members"]["foreign_keys"])
+    assert any(index["name"] == "ix_members_email" for index in tables["members"]["indexes"])
+    assert any(view["name"] == "member_view" and view["permissions"]["select"] is True for schema in payload["schemas"] for view in schema["views"])
+    assert payload["schemas"][0]["procedures"] == []
 
 
 def test_sqlite_storage_and_growth_collection(tmp_path: Path):
