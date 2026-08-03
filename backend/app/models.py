@@ -107,8 +107,10 @@ class CollectionJob(TimestampMixin, Base):
     cron: Mapped[str] = mapped_column(String(100), default="0 2 * * *")
     interval_minutes: Mapped[int | None] = mapped_column(nullable=True)
     schemas: Mapped[list[str]] = mapped_column(JSON, default=list)
+    collection_items: Mapped[list[str]] = mapped_column(JSON, default=lambda: ["INDEX", "TABLE", "VIEW", "PROCEDURE"])
     collect_storage: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     data_source: Mapped[DataSource] = relationship(back_populates="jobs")
     runs: Mapped[list["CollectionRun"]] = relationship(back_populates="job", cascade="all, delete-orphan")

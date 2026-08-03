@@ -40,6 +40,14 @@ async def lifespan(_: FastAPI):
         default = "FALSE" if engine.dialect.name == "postgresql" else "0"
         with engine.begin() as connection:
             connection.execute(text(f"ALTER TABLE collection_jobs ADD COLUMN collect_storage BOOLEAN NOT NULL DEFAULT {default}"))
+    if "collection_items" not in columns:
+        default_items = '["INDEX", "TABLE", "VIEW", "PROCEDURE"]'
+        with engine.begin() as connection:
+            if engine.dialect.name == "postgresql":
+                connection.execute(text("ALTER TABLE collection_jobs ADD COLUMN collection_items JSONB NOT NULL DEFAULT '[\"INDEX\", \"TABLE\", \"VIEW\", \"PROCEDURE\"]'::jsonb"))
+            else:
+                connection.execute(text("ALTER TABLE collection_jobs ADD COLUMN collection_items JSON NOT NULL DEFAULT '[]'"))
+                connection.execute(text("UPDATE collection_jobs SET collection_items = :items"), {"items": default_items})
     with SessionLocal() as session:
         seed(session)
     start_scheduler()

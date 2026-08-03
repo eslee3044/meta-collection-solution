@@ -60,3 +60,23 @@ def test_docker_supports_sql_server_and_oracle(monkeypatch):
     assert is_supported_db_type("mssql")
     assert is_supported_db_type("oracle")
     assert is_supported_db_type("postgresql")
+
+
+def test_collection_item_selection_excludes_unselected_objects(tmp_path: Path):
+    db_path = tmp_path / "selection.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE records (id INTEGER PRIMARY KEY, value TEXT)"))
+        connection.execute(text("CREATE INDEX ix_records_value ON records(value)"))
+        connection.execute(text("CREATE VIEW record_view AS SELECT id, value FROM records"))
+
+    source = DataSource(name="selection", db_type="sqlite", database=str(db_path), host="", username="")
+    payload, count, _ = collect_schema(source, selected_items=["TABLE"])
+
+    schema = payload["schemas"][0]
+    assert payload["collection_options"]["items"] == ["TABLE"]
+    assert [table["name"] for table in schema["tables"]] == ["records"]
+    assert schema["tables"][0]["indexes"] == []
+    assert schema["views"] == []
+    assert schema["procedures"] == []
+    assert count == 1

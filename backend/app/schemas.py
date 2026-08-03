@@ -78,6 +78,7 @@ class JobIn(BaseModel):
     cron: str = "0 2 * * *"
     interval_minutes: int | None = Field(default=None, ge=1)
     schemas: list[str] = []
+    collection_items: list[str] = Field(default_factory=lambda: ["INDEX", "TABLE", "VIEW", "PROCEDURE"])
     collect_storage: bool = False
     is_active: bool = True
 
@@ -91,6 +92,7 @@ class JobOut(BaseModel):
     cron: str
     interval_minutes: int | None
     schemas: list[str]
+    collection_items: list[str]
     collect_storage: bool
     is_active: bool
     next_run_at: datetime | None

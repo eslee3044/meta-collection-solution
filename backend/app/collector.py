@@ -18,6 +18,8 @@ from .capabilities import assert_supported_db_type
 
 
 DEFAULT_PORTS = {"postgresql": 5432, "mysql": 3306, "mariadb": 3306, "mssql": 1433, "oracle": 1521, "db2": 50000}
+DEFAULT_COLLECTION_ITEMS = ("INDEX", "TABLE", "VIEW", "PROCEDURE")
+ALL_COLLECTION_ITEMS = ("INDEX", "TABLE", "VIEW", "PROCEDURE", "TRIGGER", "TABLE PARTITION", "INDEX PARTITION", "TABLE SUBPARTITION", "INDEX SUBPARTITION", "MVIEW", "SEQUENCE", "DATABASE LINK", "SYNONYM")
 
 
 def _safe(call, default):
@@ -256,8 +258,10 @@ def collect_schema(
     source: DataSource,
     selected_schemas: list[str] | None = None,
     include_storage: bool = False,
+    selected_items: list[str] | None = None,
 ) -> tuple[dict, int, str]:
     assert_supported_db_type(source.db_type)
+    items = {item.upper() for item in (selected_items or DEFAULT_COLLECTION_ITEMS) if item.upper() in ALL_COLLECTION_ITEMS}
     with source_engine(source) as engine, engine.connect() as connection:
         inspector = inspect(engine)
         available = inspector.get_schema_names()
@@ -271,22 +275,22 @@ def collect_schema(
             "source": source.name,
             "db_type": source.db_type,
             "database": source.database,
-            "collection_options": {"basic": True, "storage_growth": include_storage},
+            "collection_options": {"items": sorted(items), "storage_growth": include_storage},
             "schemas": [],
         }
         count = 0
         for schema_name in schemas:
-            schema = {"name": schema_name, "tables": [], "views": [], "procedures": _collect_procedures(connection, source, schema_name)}
+            schema = {"name": schema_name, "tables": [], "views": [], "procedures": _collect_procedures(connection, source, schema_name) if "PROCEDURE" in items else []}
             permissions = _collect_select_permissions(connection, source, schema_name)
             storage_metrics = _storage_metrics(connection, source, schema_name) if include_storage else {}
-            for table_name in inspector.get_table_names(schema=schema_name):
+            for table_name in inspector.get_table_names(schema=schema_name) if "TABLE" in items else []:
                 table = {
                     "name": table_name,
                     "comment": (_safe(lambda: inspector.get_table_comment(table_name, schema=schema_name), {}) or {}).get("text"),
                     "columns": inspector.get_columns(table_name, schema=schema_name),
                     "primary_key": _safe(lambda: inspector.get_pk_constraint(table_name, schema=schema_name), {}),
                     "foreign_keys": _safe(lambda: inspector.get_foreign_keys(table_name, schema=schema_name), []),
-                    "indexes": _safe(lambda: inspector.get_indexes(table_name, schema=schema_name), []),
+                    "indexes": _safe(lambda: inspector.get_indexes(table_name, schema=schema_name), []) if "INDEX" in items else [],
                     "unique_constraints": _safe(lambda: inspector.get_unique_constraints(table_name, schema=schema_name), []),
                     "permissions": permissions.get(table_name, permissions.get("*", {"select": False, "privileges": [], "checked_as": source.username or "current_user"})),
                 }
@@ -296,7 +300,7 @@ def collect_schema(
                     column["type"] = str(column["type"])
                 schema["tables"].append(table)
                 count += 1
-            for view_name in inspector.get_view_names(schema=schema_name):
+            for view_name in inspector.get_view_names(schema=schema_name) if "VIEW" in items else []:
                 schema["views"].append({"name": view_name, "definition": inspector.get_view_definition(view_name, schema=schema_name), "permissions": permissions.get(view_name, permissions.get("*", {"select": False, "privileges": [], "checked_as": source.username or "current_user"}))})
                 count += 1
             count += len(schema["procedures"])

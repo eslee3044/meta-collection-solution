@@ -23,7 +23,7 @@ def execute_job(job_id: int) -> int:
         session.add(run)
         session.commit()
         try:
-            payload, count, fingerprint = collect_schema(job.data_source, job.schemas, job.collect_storage)
+            payload, count, fingerprint = collect_schema(job.data_source, job.schemas, job.collect_storage, job.collection_items)
             if job.collect_storage:
                 previous = session.scalar(
                     select(SchemaSnapshot)
