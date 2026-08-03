@@ -11,6 +11,7 @@ services:
       METAVAULT_DEPLOYMENT_MODE: docker
     volumes:
       - metavault-data:/data
+      - ./sample:/app/sample:ro
     ports:
       - "8000:8000"
     healthcheck:
