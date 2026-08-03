@@ -107,7 +107,7 @@ class CollectionJob(TimestampMixin, Base):
     cron: Mapped[str] = mapped_column(String(100), default="0 2 * * *")
     interval_minutes: Mapped[int | None] = mapped_column(nullable=True)
     schemas: Mapped[list[str]] = mapped_column(JSON, default=list)
-    collection_items: Mapped[list[str]] = mapped_column(JSON, default=lambda: ["INDEX", "TABLE", "VIEW", "PROCEDURE"])
+    collection_items: Mapped[list[str]] = mapped_column(JSON, default=lambda: ["INDEX", "TABLE", "VIEW", "PROCEDURE", "SELECT PRIVILEGE"])
     collect_storage: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 

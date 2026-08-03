@@ -77,6 +77,7 @@ def test_collection_item_selection_excludes_unselected_objects(tmp_path: Path):
     assert payload["collection_options"]["items"] == ["TABLE"]
     assert [table["name"] for table in schema["tables"]] == ["records"]
     assert schema["tables"][0]["indexes"] == []
+    assert schema["tables"][0]["permissions"]["select"] is None
     assert schema["views"] == []
     assert schema["procedures"] == []
     assert count == 1

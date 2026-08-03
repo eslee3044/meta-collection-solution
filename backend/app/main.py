@@ -41,14 +41,17 @@ async def lifespan(_: FastAPI):
         with engine.begin() as connection:
             connection.execute(text(f"ALTER TABLE collection_jobs ADD COLUMN collect_storage BOOLEAN NOT NULL DEFAULT {default}"))
     if "collection_items" not in columns:
-        default_items = '["INDEX", "TABLE", "VIEW", "PROCEDURE"]'
+        default_items = '["INDEX", "TABLE", "VIEW", "PROCEDURE", "SELECT PRIVILEGE"]'
         with engine.begin() as connection:
             if engine.dialect.name == "postgresql":
-                connection.execute(text("ALTER TABLE collection_jobs ADD COLUMN collection_items JSONB NOT NULL DEFAULT '[\"INDEX\", \"TABLE\", \"VIEW\", \"PROCEDURE\"]'::jsonb"))
+                connection.execute(text("ALTER TABLE collection_jobs ADD COLUMN collection_items JSONB NOT NULL DEFAULT '[\"INDEX\", \"TABLE\", \"VIEW\", \"PROCEDURE\", \"SELECT PRIVILEGE\"]'::jsonb"))
             else:
                 connection.execute(text("ALTER TABLE collection_jobs ADD COLUMN collection_items JSON NOT NULL DEFAULT '[]'"))
                 connection.execute(text("UPDATE collection_jobs SET collection_items = :items"), {"items": default_items})
     with SessionLocal() as session:
+        for job in session.scalars(select(CollectionJob)).all():
+            if set(job.collection_items or []) == {"INDEX", "TABLE", "VIEW", "PROCEDURE"}:
+                job.collection_items = [*job.collection_items, "SELECT PRIVILEGE"]
         seed(session)
     start_scheduler()
     yield

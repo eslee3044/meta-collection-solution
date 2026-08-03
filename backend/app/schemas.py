@@ -78,7 +78,7 @@ class JobIn(BaseModel):
     cron: str = "0 2 * * *"
     interval_minutes: int | None = Field(default=None, ge=1)
     schemas: list[str] = []
-    collection_items: list[str] = Field(default_factory=lambda: ["INDEX", "TABLE", "VIEW", "PROCEDURE"])
+    collection_items: list[str] = Field(default_factory=lambda: ["INDEX", "TABLE", "VIEW", "PROCEDURE", "SELECT PRIVILEGE"])
     collect_storage: bool = False
     is_active: bool = True
 
