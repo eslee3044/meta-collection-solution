@@ -34,13 +34,13 @@ npm run dev
 
 브라우저에서 `http://localhost:5173`을 열고 기본 계정 `admin@example.com` / `Admin123!`로 로그인합니다. 운영 환경에서는 `.env`의 관리자 비밀번호와 비밀키를 반드시 변경하세요.
 
-Docker가 설치되어 있다면 저장소 루트에서 `docker compose up --build` 후 `http://localhost:8080`으로 접속할 수 있습니다. Docker 배포 모드에서는 기본 이미지에 포함되지 않은 SQL Server와 Oracle을 신규 연결·연결 테스트·수집 대상에서 제외합니다. 기존에 등록된 SQL Server/Oracle 작업도 스케줄러가 자동으로 실행하지 않습니다.
+Docker가 설치되어 있다면 저장소 루트에서 `docker compose up --build` 후 `http://localhost:8080`으로 접속할 수 있습니다. Docker 이미지에는 SQL Server용 Microsoft ODBC Driver 18과 Oracle용 `python-oracledb` Thin 모드 드라이버가 포함됩니다.
 
 ## DB 드라이버 참고
 
 - PostgreSQL과 MySQL/MariaDB 드라이버는 기본 설치됩니다.
-- SQL Server는 `pip install -e ".[mssql]"` 및 Microsoft ODBC Driver 18 설치가 필요합니다.
-- Oracle은 `pip install -e ".[oracle]"`로 thin 드라이버를 추가합니다.
+- SQL Server는 `pip install -e ".[mssql]"` 및 Microsoft ODBC Driver 18 설치가 필요합니다. Docker 이미지에는 자동으로 포함됩니다.
+- Oracle은 `pip install -e ".[oracle]"`로 thin 드라이버를 추가합니다. Docker에서는 Oracle Client 없이 Thin 모드로 동작합니다.
 
 ## 검증
 

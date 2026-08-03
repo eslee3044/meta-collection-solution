@@ -2,7 +2,7 @@ from .config import get_settings
 
 
 ALL_DB_TYPES = ("postgresql", "mysql", "mariadb", "mssql", "oracle", "sqlite", "db2", "bigquery")
-DOCKER_EXCLUDED_DB_TYPES = ("mssql", "oracle")
+DOCKER_EXCLUDED_DB_TYPES: tuple[str, ...] = ()
 
 
 def supported_db_types() -> tuple[str, ...]:

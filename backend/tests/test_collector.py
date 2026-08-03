@@ -49,10 +49,10 @@ def test_sqlite_storage_and_growth_collection(tmp_path: Path):
     assert current["storage_summary"]["comparable_tables"] == 1
 
 
-def test_docker_excludes_sql_server_and_oracle(monkeypatch):
+def test_docker_supports_sql_server_and_oracle(monkeypatch):
     monkeypatch.setattr("app.capabilities.get_settings", lambda: type("Settings", (), {"deployment_mode": "docker"})())
-    assert "mssql" not in supported_db_types()
-    assert "oracle" not in supported_db_types()
-    assert not is_supported_db_type("mssql")
-    assert not is_supported_db_type("oracle")
+    assert "mssql" in supported_db_types()
+    assert "oracle" in supported_db_types()
+    assert is_supported_db_type("mssql")
+    assert is_supported_db_type("oracle")
     assert is_supported_db_type("postgresql")
