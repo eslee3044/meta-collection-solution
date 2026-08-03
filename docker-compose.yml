@@ -6,7 +6,7 @@ services:
       METAVAULT_SECRET_KEY: ${METAVAULT_SECRET_KEY:-change-this-before-production}
       METAVAULT_ADMIN_EMAIL: ${METAVAULT_ADMIN_EMAIL:-admin@example.com}
       METAVAULT_ADMIN_PASSWORD: ${METAVAULT_ADMIN_PASSWORD:-Admin123!}
-      METAVAULT_CORS_ORIGINS: http://localhost:8080
+      METAVAULT_CORS_ORIGINS: http://localhost:8090
       METAVAULT_DEPLOYMENT_MODE: docker
     volumes:
       - metavault-data:/data
@@ -23,6 +23,6 @@ services:
       api:
         condition: service_healthy
     ports:
-      - "8080:80"
+      - "8090:80"
 volumes:
   metavault-data:
