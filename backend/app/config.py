@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     admin_email: str = "admin@example.com"
     admin_password: str = "Admin123!"
     cors_origins: str = "http://localhost:5173"
+    deployment_mode: str = "local"
     token_minutes: int = 480
 
     model_config = SettingsConfigDict(

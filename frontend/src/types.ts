@@ -5,3 +5,4 @@ export type Run = { id: number; job_id: number; status: string; started_at: stri
 export type Role = { id: number; name: string; description: string; permissions: number[]; menus: number[] }
 export type Permission = { id: number; code: string; description: string }
 export type Menu = { id: number; code: string; label: string; path: string; icon: string; order: number }
+export type Capabilities = { deployment_mode: string; supported_db_types: string[]; excluded_db_types: string[] }

@@ -7,15 +7,22 @@ services:
       METAVAULT_ADMIN_EMAIL: ${METAVAULT_ADMIN_EMAIL:-admin@example.com}
       METAVAULT_ADMIN_PASSWORD: ${METAVAULT_ADMIN_PASSWORD:-Admin123!}
       METAVAULT_CORS_ORIGINS: http://localhost:8080
+      METAVAULT_DEPLOYMENT_MODE: docker
     volumes:
       - metavault-data:/data
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
   web:
     build: ./frontend
-    depends_on: [api]
+    depends_on:
+      api:
+        condition: service_healthy
     ports:
       - "8080:80"
 volumes:
   metavault-data:
-

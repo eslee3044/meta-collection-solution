@@ -5,6 +5,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import desc, select
 
+from .capabilities import is_supported_db_type
 from .collector import collect_schema
 from .database import SessionLocal
 from .models import CollectionJob, CollectionRun, SchemaSnapshot
@@ -75,6 +76,9 @@ def sync_jobs() -> None:
     with SessionLocal() as session:
         jobs = session.scalars(select(CollectionJob).where(CollectionJob.is_active.is_(True))).all()
         for job in jobs:
+            if not is_supported_db_type(job.data_source.db_type):
+                job.next_run_at = None
+                continue
             if job.schedule_type == "cron":
                 trigger = CronTrigger.from_crontab(job.cron, timezone="Asia/Seoul")
             elif job.schedule_type == "interval" and job.interval_minutes:

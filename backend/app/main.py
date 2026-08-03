@@ -15,6 +15,7 @@ from .database import Base, SessionLocal, engine, get_session
 from .dependencies import current_user, require
 from .excel_export import build_schema_workbook
 from .models import CollectionJob, CollectionRun, DataSource, Menu, Permission, Role, SchemaSnapshot, User
+from .capabilities import assert_supported_db_type
 from .collector import test_source
 from .scheduler import execute_job, start_scheduler, stop_scheduler, sync_jobs
 from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, PasswordChangeIn, RoleIn, RunOut, UserIn, UserOut
@@ -56,6 +57,17 @@ def health():
     return {"status": "ok", "service": settings.app_name}
 
 
+@app.get("/api/capabilities")
+def capabilities():
+    from .capabilities import DOCKER_EXCLUDED_DB_TYPES, supported_db_types
+
+    return {
+        "deployment_mode": settings.deployment_mode,
+        "supported_db_types": list(supported_db_types()),
+        "excluded_db_types": list(DOCKER_EXCLUDED_DB_TYPES if settings.deployment_mode == "docker" else []),
+    }
+
+
 @app.post("/api/auth/login", response_model=LoginResponse)
 def login(payload: LoginRequest, session: Session = Depends(get_session)):
     user = session.scalar(select(User).where(User.email == payload.email))
@@ -93,6 +105,10 @@ def dashboard(session: Session = Depends(get_session), _: User = Depends(current
 
 
 def apply_source(item: DataSource, payload: DataSourceIn) -> None:
+    try:
+        assert_supported_db_type(payload.db_type)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     for field in ["name", "db_type", "host", "port", "database", "username", "options", "ssh_enabled", "ssh_host", "ssh_port", "ssh_username", "ssh_auth_type"]:
         setattr(item, field, getattr(payload, field))
     if payload.password is not None:
@@ -177,8 +193,13 @@ def list_jobs(session: Session = Depends(get_session), _: User = Depends(require
 
 @app.post("/api/jobs", response_model=JobOut, status_code=201)
 def create_job(payload: JobIn, session: Session = Depends(get_session), _: User = Depends(require("jobs:write"))):
-    if not session.get(DataSource, payload.data_source_id):
+    source = session.get(DataSource, payload.data_source_id)
+    if not source:
         raise HTTPException(400, "데이터 소스를 찾을 수 없습니다.")
+    try:
+        assert_supported_db_type(source.db_type)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     item = CollectionJob(**payload.model_dump())
     session.add(item)
     session.commit()
@@ -202,8 +223,13 @@ def update_job(job_id: int, payload: JobIn, session: Session = Depends(get_sessi
 
 @app.post("/api/jobs/{job_id}/run", status_code=202)
 def run_job(job_id: int, tasks: BackgroundTasks, session: Session = Depends(get_session), _: User = Depends(require("jobs:write"))):
-    if not session.get(CollectionJob, job_id):
+    job = session.get(CollectionJob, job_id)
+    if not job:
         raise HTTPException(404, "수집 작업을 찾을 수 없습니다.")
+    try:
+        assert_supported_db_type(job.data_source.db_type)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     tasks.add_task(execute_job, job_id)
     return {"status": "accepted"}
 
@@ -279,6 +305,17 @@ def update_user(user_id: int, payload: UserIn, session: Session = Depends(get_se
     item.roles = list(session.scalars(select(Role).where(Role.id.in_(payload.role_ids))).all()) if payload.role_ids else []
     session.commit()
     return user_out(item)
+
+
+@app.delete("/api/admin/users/{user_id}", status_code=204)
+def delete_user(user_id: int, session: Session = Depends(get_session), _: User = Depends(require("users:write"))):
+    item = session.get(User, user_id)
+    if not item:
+        raise HTTPException(404, "사용자를 찾을 수 없습니다.")
+    if item.id == _.id:
+        raise HTTPException(400, "자기 자신은 삭제할 수 없습니다.")
+    session.delete(item)
+    session.commit()
 
 
 @app.get("/api/admin/roles")

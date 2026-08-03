@@ -14,6 +14,7 @@ from sshtunnel import SSHTunnelForwarder
 
 from .models import DataSource
 from .security import decrypt_json
+from .capabilities import assert_supported_db_type
 
 
 DEFAULT_PORTS = {"postgresql": 5432, "mysql": 3306, "mariadb": 3306, "mssql": 1433, "oracle": 1521, "db2": 50000}
@@ -100,6 +101,7 @@ def source_engine(source: DataSource) -> Iterator[Engine]:
 
 
 def test_source(source: DataSource) -> None:
+    assert_supported_db_type(source.db_type)
     with source_engine(source) as engine, engine.connect() as connection:
         connection.execute(text("SELECT 1"))
 
@@ -219,6 +221,7 @@ def collect_schema(
     selected_schemas: list[str] | None = None,
     include_storage: bool = False,
 ) -> tuple[dict, int, str]:
+    assert_supported_db_type(source.db_type)
     with source_engine(source) as engine, engine.connect() as connection:
         inspector = inspect(engine)
         available = inspector.get_schema_names()
