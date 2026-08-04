@@ -190,7 +190,21 @@ function JobImportGuide({ onClose }: { onClose: () => void }) {
       - SELECT PRIVILEGE
     collect_storage: true
     is_active: true`
-  return <Modal title="수집 스케줄 Import 가이드" subtitle="YAML 또는 JSON으로 여러 스케줄을 한 번에 등록합니다." onClose={onClose} wide><div className="guide-content"><h4>필수 필드</h4><ul><li><b>name</b>: 수집 작업 이름</li><li><b>data_source</b>: DB 접속 관리에 등록된 연결 이름 또는 <b>data_source_id</b></li><li><b>schedule_type</b>: cron, interval, manual 중 하나</li><li><b>cron</b>: cron 방식의 실행 표현식</li><li><b>interval_minutes</b>: interval 방식의 실행 간격(분)</li></ul><h4>YAML 예시</h4><pre className="guide-code">{example}</pre><p>중복 이름은 Import 화면에서 건너뛰기, 덮어쓰기, 이름 변경 중 선택합니다. 수집 항목은 현재 지원되는 작업 옵션을 그대로 사용합니다.</p></div></Modal>
+  const jsonExample = `{
+  "jobs": [
+    {
+      "name": "운영 DB 매일 수집",
+      "data_source": "운영 PostgreSQL",
+      "schedule_type": "cron",
+      "cron": "0 2 * * *",
+      "schemas": ["public"],
+      "collection_items": ["TABLE", "VIEW", "INDEX", "SELECT PRIVILEGE"],
+      "collect_storage": true,
+      "is_active": true
+    }
+  ]
+}`
+  return <Modal title="수집 스케줄 Import 가이드" subtitle="YAML 또는 JSON으로 여러 스케줄을 한 번에 등록합니다." onClose={onClose} wide><div className="guide-content"><h4>필수 필드</h4><ul><li><b>name</b>: 수집 작업 이름</li><li><b>data_source</b>: DB 접속 관리에 등록된 연결 이름 또는 <b>data_source_id</b></li><li><b>schedule_type</b>: cron, interval, manual 중 하나</li><li><b>cron</b>: cron 방식의 실행 표현식</li><li><b>interval_minutes</b>: interval 방식의 실행 간격(분)</li></ul><h4>YAML 예시</h4><pre className="guide-code">{example}</pre><h4>JSON 예시</h4><pre className="guide-code">{jsonExample}</pre><p>중복 이름은 Import 화면에서 건너뛰기, 덮어쓰기, 이름 변경 중 선택합니다. 수집 항목은 현재 지원되는 작업 옵션을 그대로 사용합니다.</p></div></Modal>
 }
 
 function JobImportDialog({ onClose, onDone }: { onClose: () => void; onDone: (message: string) => void }) {
