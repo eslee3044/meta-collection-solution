@@ -7,11 +7,16 @@ from sqlalchemy import desc, select
 
 from .capabilities import is_supported_db_type
 from .collector import collect_schema
+from .config import get_settings
 from .database import SessionLocal
 from .models import CollectionJob, CollectionRun, SchemaSnapshot
 
 
-scheduler = BackgroundScheduler(timezone="Asia/Seoul")
+scheduler = BackgroundScheduler(
+    timezone="Asia/Seoul",
+    executors={"default": {"type": "threadpool", "max_workers": get_settings().collection_workers}},
+    job_defaults={"coalesce": False, "max_instances": 1},
+)
 
 
 def execute_job(job_id: int) -> int:
