@@ -182,7 +182,7 @@ def _resolve_import_values(value: Any) -> Any:
     return value
 
 
-def _parse_source_import(filename: str, content: bytes) -> list[dict[str, Any]]:
+def _parse_import_list(filename: str, content: bytes, key: str) -> list[dict[str, Any]]:
     if len(content) > 2 * 1024 * 1024:
         raise HTTPException(413, "Import 파일은 2MB 이하만 지원합니다.")
     suffix = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
@@ -192,13 +192,17 @@ def _parse_source_import(filename: str, content: bytes) -> list[dict[str, Any]]:
     except (UnicodeDecodeError, json.JSONDecodeError, yaml.YAMLError) as exc:
         raise HTTPException(400, "유효한 UTF-8 JSON 또는 YAML 파일이 아닙니다.") from exc
     if isinstance(document, dict):
-        document = document.get("connections")
+        document = document.get(key)
     if not isinstance(document, list) or not document:
-        raise HTTPException(400, "최상위 connections 배열이 필요합니다.")
+        raise HTTPException(400, f"최상위 {key} 배열이 필요합니다.")
     try:
         return [_resolve_import_values(item) for item in document]
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+def _parse_source_import(filename: str, content: bytes) -> list[dict[str, Any]]:
+    return _parse_import_list(filename, content, "connections")
 
 
 _IMPORT_SECRET_FIELDS = {"password", "service_account_json", "ssl_ca_cert", "ssl_cert", "ssl_key", "ssh_password", "ssh_private_key", "ssh_private_key_passphrase"}
@@ -308,6 +312,66 @@ def test_connection(source_id: int, session: Session = Depends(get_session), _: 
 @app.get("/api/jobs", response_model=list[JobOut])
 def list_jobs(session: Session = Depends(get_session), _: User = Depends(require("jobs:read"))):
     return session.scalars(select(CollectionJob).order_by(desc(CollectionJob.created_at))).all()
+
+
+def _normalise_job_item(raw: dict[str, Any], session: Session) -> JobIn:
+    item = dict(raw)
+    source_ref = item.pop("data_source", None)
+    if source_ref is not None and not item.get("data_source_id"):
+        source = session.scalar(select(DataSource).where(DataSource.name == str(source_ref)))
+        if not source:
+            raise ValueError(f"데이터 소스 '{source_ref}'를 찾을 수 없습니다.")
+        item["data_source_id"] = source.id
+    return JobIn.model_validate(item)
+
+
+def _preview_job_item(item: JobIn, session: Session) -> dict[str, Any]:
+    source = session.get(DataSource, item.data_source_id)
+    return {"name": item.name, "data_source": source.name if source else f"#{item.data_source_id}", "schedule_type": item.schedule_type, "cron": item.cron, "interval_minutes": item.interval_minutes, "schemas": item.schemas, "collection_items": item.collection_items, "collect_storage": item.collect_storage, "is_active": item.is_active}
+
+
+@app.post("/api/jobs/import/preview")
+async def preview_jobs_import(file: UploadFile = File(...), session: Session = Depends(get_session), _: User = Depends(require("jobs:write"))):
+    items = _parse_import_list(file.filename or "jobs.yaml", await file.read(), "jobs")
+    valid, errors = [], []
+    for index, raw in enumerate(items, start=1):
+        try:
+            valid.append(_preview_job_item(_normalise_job_item(raw, session), session))
+        except Exception as exc:
+            errors.append({"row": index, "error": str(exc)[:500]})
+    return {"total": len(items), "valid": len(valid), "errors": errors, "items": valid}
+
+
+@app.post("/api/jobs/import")
+async def import_jobs(file: UploadFile = File(...), duplicate: str = Query("skip", pattern="^(skip|overwrite|rename)$"), session: Session = Depends(get_session), _: User = Depends(require("jobs:write"))):
+    items = _parse_import_list(file.filename or "jobs.yaml", await file.read(), "jobs")
+    result = {"created": 0, "updated": 0, "skipped": 0, "errors": []}
+    for index, raw in enumerate(items, start=1):
+        try:
+            payload = _normalise_job_item(raw, session)
+            if not session.get(DataSource, payload.data_source_id):
+                raise ValueError(f"데이터 소스 #{payload.data_source_id}를 찾을 수 없습니다.")
+            existing = session.scalar(select(CollectionJob).where(CollectionJob.name == payload.name))
+            if existing and duplicate == "skip":
+                result["skipped"] += 1
+                continue
+            if existing and duplicate == "overwrite":
+                for key, value in payload.model_dump().items():
+                    setattr(existing, key, value)
+                result["updated"] += 1
+                continue
+            if existing and duplicate == "rename":
+                base, suffix = payload.name, 2
+                while session.scalar(select(CollectionJob).where(CollectionJob.name == f"{base} ({suffix})")):
+                    suffix += 1
+                payload = payload.model_copy(update={"name": f"{base} ({suffix})"})
+            session.add(CollectionJob(**payload.model_dump()))
+            result["created"] += 1
+        except Exception as exc:
+            result["errors"].append({"row": index, "error": str(exc)[:500]})
+    session.commit()
+    sync_jobs()
+    return result
 
 
 @app.post("/api/jobs", response_model=JobOut, status_code=201)
