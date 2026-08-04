@@ -12,7 +12,8 @@ HEADER_COLOR = "#15243A"
 LIGHT_COLOR = "#EDF1FF"
 
 
-def build_schema_workbook(payload: dict[str, Any], captured_at: datetime, fingerprint: str) -> bytes:
+def build_schema_workbook(payload: dict[str, Any], captured_at: datetime, fingerprint: str, selected_items: set[str] | None = None) -> bytes:
+    selected = {"SUMMARY", "TABLE", "COLUMN", "VIEW", "INDEX", "FOREIGN KEY", "PROCEDURE", "SELECT PRIVILEGE", "STORAGE"} if selected_items is None else selected_items
     output = BytesIO()
     workbook = xlsxwriter.Workbook(output, {"in_memory": True, "constant_memory": False})
     workbook.set_properties({
@@ -27,12 +28,24 @@ def build_schema_workbook(payload: dict[str, Any], captured_at: datetime, finger
     tables = [(schema, table) for schema in schemas for table in schema.get("tables", [])]
     views = [(schema, view) for schema in schemas for view in schema.get("views", [])]
 
-    _summary_sheet(workbook, formats, payload, captured_at, fingerprint, schemas, tables, views)
-    _tables_sheet(workbook, formats, tables)
-    _columns_sheet(workbook, formats, tables)
-    _views_sheet(workbook, formats, views)
-    _indexes_sheet(workbook, formats, tables)
-    _foreign_keys_sheet(workbook, formats, tables)
+    if "SUMMARY" in selected:
+        _summary_sheet(workbook, formats, payload, captured_at, fingerprint, schemas, tables, views)
+    if "TABLE" in selected:
+        _tables_sheet(workbook, formats, tables, include_storage="STORAGE" in selected)
+    if "COLUMN" in selected:
+        _columns_sheet(workbook, formats, tables)
+    if "VIEW" in selected:
+        _views_sheet(workbook, formats, views)
+    if "INDEX" in selected:
+        _indexes_sheet(workbook, formats, tables)
+    if "FOREIGN KEY" in selected:
+        _foreign_keys_sheet(workbook, formats, tables)
+    if "PROCEDURE" in selected:
+        _procedures_sheet(workbook, formats, schemas)
+    if "SELECT PRIVILEGE" in selected:
+        _permissions_sheet(workbook, formats, schemas)
+    if "STORAGE" in selected:
+        _storage_sheet(workbook, formats, tables)
 
     workbook.close()
     return output.getvalue()
@@ -140,14 +153,20 @@ def _summary_sheet(workbook, formats, payload, captured_at, fingerprint, schemas
                 sheet.write_number(storage_start + offset, 1, value, formats["number"])
 
 
-def _tables_sheet(workbook, formats, tables):
-    headers = ["스키마", "테이블", "설명", "컬럼 수", "기본 키", "외래 키 수", "인덱스 수", "데이터 Bytes", "인덱스 Bytes", "전체 Bytes", "증가 Bytes", "증가율", "예상 행 수"]
-    sheet = _base_sheet(workbook, "테이블", headers, [20, 28, 38, 11, 24, 11, 11, 16, 16, 16, 16, 12, 16], formats)
+def _tables_sheet(workbook, formats, tables, include_storage: bool = True):
+    headers = ["스키마", "테이블", "설명", "컬럼 수", "기본 키", "외래 키 수", "인덱스 수"]
+    widths = [20, 28, 38, 11, 24, 11, 11]
+    if include_storage:
+        headers += ["데이터 Bytes", "인덱스 Bytes", "전체 Bytes", "증가 Bytes", "증가율", "예상 행 수"]
+        widths += [16, 16, 16, 16, 12, 16]
+    sheet = _base_sheet(workbook, "테이블", headers, widths, formats)
     for row, (schema, table) in enumerate(tables, start=1):
         storage = table.get("storage") or {}
-        growth_percent = storage.get("growth_percent")
-        values = [schema.get("name"), table.get("name"), table.get("comment"), len(table.get("columns", [])), ", ".join(table.get("primary_key", {}).get("constrained_columns") or []), len(table.get("foreign_keys", [])), len(table.get("indexes", [])), storage.get("data_bytes"), storage.get("index_bytes"), storage.get("total_bytes"), storage.get("growth_bytes"), growth_percent / 100 if growth_percent is not None else None, storage.get("row_estimate")]
-        _write_row(sheet, row, values, formats, percent_columns={11}, wrap_columns={2})
+        values = [schema.get("name"), table.get("name"), table.get("comment"), len(table.get("columns", [])), ", ".join(table.get("primary_key", {}).get("constrained_columns") or []), len(table.get("foreign_keys", [])), len(table.get("indexes", []))]
+        if include_storage:
+            growth_percent = storage.get("growth_percent")
+            values += [storage.get("data_bytes"), storage.get("index_bytes"), storage.get("total_bytes"), storage.get("growth_bytes"), growth_percent / 100 if growth_percent is not None else None, storage.get("row_estimate")]
+        _write_row(sheet, row, values, formats, percent_columns={11} if include_storage else set(), wrap_columns={2})
     _finish_table(sheet, len(tables) + 1, len(headers))
 
 
@@ -194,3 +213,38 @@ def _foreign_keys_sheet(workbook, formats, tables):
             _write_row(sheet, row, [schema.get("name"), table.get("name"), key.get("name"), ", ".join(key.get("constrained_columns") or []), key.get("referred_schema"), key.get("referred_table"), ", ".join(key.get("referred_columns") or [])], formats)
             row += 1
     _finish_table(sheet, row, len(headers))
+
+
+def _procedures_sheet(workbook, formats, schemas):
+    headers = ["스키마", "프로시저/함수", "유형", "정의"]
+    sheet = _base_sheet(workbook, "프로시저", headers, [20, 34, 18, 100], formats)
+    row = 1
+    for schema in schemas:
+        for procedure in schema.get("procedures", []):
+            _write_row(sheet, row, [schema.get("name"), procedure.get("name"), procedure.get("routine_type") or procedure.get("type"), procedure.get("definition") or procedure.get("body")], formats, wrap_columns={3})
+            row += 1
+    _finish_table(sheet, row, len(headers))
+
+
+def _permissions_sheet(workbook, formats, schemas):
+    headers = ["스키마", "객체 유형", "객체", "SELECT 가능", "확인 사용자", "권한 목록"]
+    sheet = _base_sheet(workbook, "조회 권한", headers, [20, 16, 34, 14, 24, 60], formats)
+    row = 1
+    for schema in schemas:
+        for object_type, objects in (("테이블", schema.get("tables", [])), ("뷰", schema.get("views", []))):
+            for item in objects:
+                permission = item.get("permissions") or {}
+                _write_row(sheet, row, [schema.get("name"), object_type, item.get("name"), permission.get("select"), permission.get("checked_as"), ", ".join(permission.get("privileges") or [])], formats, wrap_columns={5})
+                row += 1
+    _finish_table(sheet, row, len(headers))
+
+
+def _storage_sheet(workbook, formats, tables):
+    headers = ["스키마", "테이블", "데이터 Bytes", "인덱스 Bytes", "전체 Bytes", "이전 전체 Bytes", "증가 Bytes", "증가율", "예상 행 수"]
+    sheet = _base_sheet(workbook, "스토리지", headers, [20, 28, 18, 18, 18, 20, 16, 12, 16], formats)
+    for row, (schema, table) in enumerate(tables, start=1):
+        storage = table.get("storage") or {}
+        growth_percent = storage.get("growth_percent")
+        values = [schema.get("name"), table.get("name"), storage.get("data_bytes"), storage.get("index_bytes"), storage.get("total_bytes"), storage.get("previous_total_bytes"), storage.get("growth_bytes"), growth_percent / 100 if growth_percent is not None else None, storage.get("row_estimate")]
+        _write_row(sheet, row, values, formats, percent_columns={7})
+    _finish_table(sheet, len(tables) + 1, len(headers))

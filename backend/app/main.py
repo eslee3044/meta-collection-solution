@@ -272,11 +272,12 @@ def metadata(session: Session = Depends(get_session), _: User = Depends(require(
 
 
 @app.get("/api/metadata/{snapshot_id}/export.xlsx")
-def export_metadata(snapshot_id: int, session: Session = Depends(get_session), _: User = Depends(require("metadata:read"))):
+def export_metadata(snapshot_id: int, items: str | None = None, session: Session = Depends(get_session), _: User = Depends(require("metadata:read"))):
     snapshot = session.get(SchemaSnapshot, snapshot_id)
     if not snapshot:
         raise HTTPException(404, "수집된 스키마 정보를 찾을 수 없습니다.")
-    content = build_schema_workbook(snapshot.payload, snapshot.captured_at, snapshot.fingerprint)
+    selected_items = {item.strip() for item in items.split(",") if item.strip()} if items else None
+    content = build_schema_workbook(snapshot.payload, snapshot.captured_at, snapshot.fingerprint, selected_items=selected_items)
     source_name = re.sub(r"[^0-9A-Za-z가-힣_-]+", "_", str(snapshot.payload.get("source") or "schema")).strip("_") or "schema"
     filename = f"MetaVault_{source_name}_{snapshot.captured_at:%Y%m%d_%H%M%S}.xlsx"
     fallback = f"metavault_schema_{snapshot.id}.xlsx"
