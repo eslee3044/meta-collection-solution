@@ -2,7 +2,7 @@ import { FormEvent, ReactNode, useEffect, useMemo, useState } from 'react'
 import {
   Activity, CalendarClock, Check, ChevronDown, CircleAlert, Database, Eye, Gauge,
   KeyRound, LayoutDashboard, LockKeyhole, LogOut, Menu as MenuIcon, Play, Plus,
-  RefreshCw, Search, Server, ShieldCheck, TableProperties, Trash2, Pencil, Download, Users, X, Zap,
+  RefreshCw, Search, Server, ShieldCheck, TableProperties, Trash2, Pencil, Download, Upload, BookOpen, Users, X, Zap,
 } from 'lucide-react'
 import { api, ApiError, fmt } from './api'
 import type { Capabilities, Job, Menu, Permission, Role, Run, Source, User } from './types'
@@ -95,24 +95,75 @@ function PageHead({ eyebrow, title, description, action }: { eyebrow: string; ti
 function PanelHead({ title, text, action }: { title: string; text?: string; action?: ReactNode }) { return <div className="panel-head"><div><h3>{title}</h3>{text && <p>{text}</p>}</div>{action}</div> }
 
 function SourceForm({ onClose, onDone, supportedDbTypes }: { onClose: () => void; onDone: () => void; supportedDbTypes: string[] }) {
-  const [form, setForm] = useState<any>({ name: '', db_type: 'postgresql', host: 'localhost', port: 5432, database: '', username: '', password: '', ssh_enabled: false, ssh_port: 22, ssh_auth_type: 'private_key' })
+  const [form,setForm] = useState<any>({ name: '', db_type: 'postgresql', host: 'localhost', port: 5432, database: '', username: '', password: '', ssl_enabled: false, ssl_ca_cert: '', ssl_cert: '', ssl_key: '', ssh_enabled: false, ssh_port: 22, ssh_auth_type: 'private_key' })
   const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
   const set = (key: string, value: any) => setForm((f: any) => ({ ...f, [key]: value }))
   const submit = async (e: FormEvent) => { e.preventDefault(); setBusy(true); setError(''); try { await api('/api/sources', { method: 'POST', body: JSON.stringify(form) }); onDone() } catch (e) { setError((e as Error).message) } finally { setBusy(false) } }
   return <Modal title="데이터베이스 연결 추가" subtitle="접속 정보는 암호화되어 안전하게 저장됩니다." onClose={onClose} wide><form onSubmit={submit}><div className="form-section"><h4>기본 접속 정보</h4><div className="form-grid"><label>연결 이름<input required placeholder="예: 운영계 PostgreSQL" value={form.name} onChange={e => set('name', e.target.value)}/></label><label>데이터베이스 종류<select value={form.db_type} onChange={e => { const type = e.target.value; setForm({ ...form, db_type: type, port: dbPorts[type] || undefined }) }}>{Object.entries(dbNames).filter(([value]) => supportedDbTypes.includes(value)).map(([v,l]) => <option value={v} key={v}>{l}</option>)}</select></label>{form.db_type === 'sqlite' ? <label className="span-2">DB 파일 경로<input required placeholder="C:\data\sample.db" value={form.database} onChange={e => set('database', e.target.value)}/></label> : <><label>호스트<input required value={form.host} onChange={e => set('host', e.target.value)}/></label><label>포트<input required type="number" value={form.port || ''} onChange={e => set('port', Number(e.target.value))}/></label><label>데이터베이스 / 서비스명<input required value={form.database} onChange={e => set('database', e.target.value)}/></label><label>사용자명<input required value={form.username} onChange={e => set('username', e.target.value)}/></label><label className="span-2">비밀번호<input type="password" value={form.password} onChange={e => set('password', e.target.value)}/></label></>}</div></div>
+    {form.db_type !== 'sqlite' && <div className="form-section"><div className="toggle-row"><div><h4>SSL/TLS 암호화</h4><p>인증서 기반으로 안전하게 데이터베이스에 연결합니다. Aiven MySQL은 CA 인증서가 필요합니다.</p></div><button type="button" className={`toggle ${form.ssl_enabled ? 'on' : ''}`} onClick={() => set('ssl_enabled', !form.ssl_enabled)}><i/></button></div>{form.ssl_enabled && <div className="form-grid tunnel"><label className="span-2">CA 인증서 (PEM)<textarea required rows={7} placeholder="-----BEGIN CERTIFICATE-----" value={form.ssl_ca_cert} onChange={e => set('ssl_ca_cert', e.target.value)}/><small>서비스 제공자가 내려받은 CA 인증서 내용을 붙여넣으세요.</small></label><label className="span-2">클라이언트 인증서 (선택)<textarea rows={5} placeholder="-----BEGIN CERTIFICATE-----" value={form.ssl_cert} onChange={e => set('ssl_cert', e.target.value)}/></label><label className="span-2">클라이언트 키 (선택)<textarea rows={5} placeholder="-----BEGIN PRIVATE KEY-----" value={form.ssl_key} onChange={e => set('ssl_key', e.target.value)}/></label></div>}</div>}
     {form.db_type !== 'sqlite' && <div className="form-section"><div className="toggle-row"><div><h4>SSH 터널 사용</h4><p>점프 서버를 통해 사설망 DB에 안전하게 접속합니다.</p></div><button type="button" className={`toggle ${form.ssh_enabled ? 'on' : ''}`} onClick={() => set('ssh_enabled', !form.ssh_enabled)}><i/></button></div>{form.ssh_enabled && <div className="form-grid tunnel"><label>SSH 호스트<input required value={form.ssh_host || ''} onChange={e => set('ssh_host', e.target.value)}/></label><label>SSH 포트<input type="number" value={form.ssh_port} onChange={e => set('ssh_port', Number(e.target.value))}/></label><label>SSH 사용자<input required value={form.ssh_username || ''} onChange={e => set('ssh_username', e.target.value)}/></label><label>인증 방식<select value={form.ssh_auth_type} onChange={e => set('ssh_auth_type', e.target.value)}><option value="private_key">개인키</option><option value="password">비밀번호</option></select></label>{form.ssh_auth_type === 'private_key' ? <><label className="span-2">개인키 (PEM)<textarea required rows={5} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" value={form.ssh_private_key || ''} onChange={e => set('ssh_private_key', e.target.value)}/></label><label className="span-2">키 암호 (선택)<input type="password" value={form.ssh_private_key_passphrase || ''} onChange={e => set('ssh_private_key_passphrase', e.target.value)}/></label></> : <label className="span-2">SSH 비밀번호<input required type="password" value={form.ssh_password || ''} onChange={e => set('ssh_password', e.target.value)}/></label>}</div>}</div>}
     {error && <div className="alert"><CircleAlert size={16}/>{error}</div>}<div className="modal-actions"><button type="button" className="ghost" onClick={onClose}>취소</button><button className="primary" disabled={busy}>{busy && <RefreshCw className="spin" size={16}/>}연결 저장</button></div></form></Modal>
+}
+
+function ImportGuide({ onClose }: { onClose: () => void }) {
+  const yamlExample = `connections:
+  - name: 운영 PostgreSQL
+    db_type: postgresql
+    host: db.example.com
+    port: 5432
+    database: production
+    username: metadata_reader
+    password: \${PROD_DB_PASSWORD}
+
+  - name: 운영 Oracle
+    db_type: oracle
+    host: oracle.example.com
+    port: 1521
+    database: ORCL
+    username: metadata_reader
+    password: \${ORACLE_DB_PASSWORD}
+    options:
+      service_name: ORCL
+    ssh:
+      enabled: true
+      host: bastion.example.com
+      port: 22
+      username: deploy
+      auth_type: private_key
+      private_key: \${BASTION_PRIVATE_KEY}`
+  const jsonExample = `{
+  "connections": [
+    {
+      "name": "운영 PostgreSQL",
+      "db_type": "postgresql",
+      "host": "db.example.com",
+      "port": 5432,
+      "database": "production",
+      "username": "metadata_reader",
+      "password": "\${PROD_DB_PASSWORD}"
+    }
+  ]
+}`
+  return <Modal title="DB 접속 Import 가이드" subtitle="YAML 또는 JSON으로 여러 연결을 한 번에 등록합니다." onClose={onClose} wide><div className="guide-content"><h4>지원 형식</h4><p><code>connections</code> 배열을 최상위에 두고 각 DB 접속 정보를 입력합니다. 파일 확장자는 <code>.yaml</code>, <code>.yml</code>, <code>.json</code>을 사용하세요.</p><h4>주요 필드</h4><ul><li><b>name</b>, <b>db_type</b>은 필수입니다.</li><li><b>db_type</b>: postgresql, mysql, mariadb, mssql, oracle, sqlite, db2, bigquery</li><li>비밀번호·인증서·개인키는 <code>${'{'}환경변수명{'}'}</code>으로 작성할 수 있습니다.</li><li>SSH 설정은 <code>ssh.enabled</code>, <code>ssh.host</code>, <code>ssh.port</code> 형식으로 작성합니다.</li><li>Import 미리보기에는 비밀번호와 키가 표시되지 않습니다.</li></ul><h4>YAML 예시</h4><pre className="guide-code">{yamlExample}</pre><h4>JSON 예시</h4><pre className="guide-code">{jsonExample}</pre></div></Modal>
+}
+
+function SourceImportDialog({ onClose, onDone }: { onClose: () => void; onDone: (message: string) => void }) {
+  const [file, setFile] = useState<File|null>(null); const [preview, setPreview] = useState<any>(null); const [duplicate, setDuplicate] = useState('skip'); const [busy, setBusy] = useState(false); const [error, setError] = useState('')
+  const request = async (path: string) => { if (!file) throw new Error('Import할 YAML 또는 JSON 파일을 선택하세요.'); const form = new FormData(); form.append('file', file); const token = localStorage.getItem('metavault_token'); const response = await fetch(`${path}${path.endsWith('/import')?`?duplicate=${duplicate}`:''}`, { method:'POST', headers: token ? { Authorization: `Bearer ${token}` } : {}, body: form }); const body = await response.json().catch(()=>({})); if (!response.ok) throw new Error(body.detail || 'Import 요청에 실패했습니다.'); return body }
+  const selectFile = async (value: File|null) => { setFile(value); setPreview(null); setError(''); if (!value) return; setBusy(true); try { setPreview(await request('/api/sources/import/preview')) } catch(e) { setError((e as Error).message) } finally { setBusy(false) } }
+  const submit = async () => { setBusy(true); setError(''); try { const result=await request('/api/sources/import'); onDone(`DB 접속 Import 완료: ${result.created}개 등록, ${result.updated}개 수정, ${result.skipped}개 건너뜀`) } catch(e) { setError((e as Error).message) } finally { setBusy(false) } }
+  return <Modal title="DB 접속 일괄 Import" subtitle="YAML 또는 JSON 파일을 미리 확인한 뒤 등록합니다." onClose={onClose} wide><div className="import-content"><label className="file-drop"><Upload size={22}/><b>{file ? file.name : 'YAML 또는 JSON 파일을 선택하세요'}</b><small>최대 2MB · .yaml, .yml, .json</small><input type="file" accept=".yaml,.yml,.json,application/json,text/yaml" onChange={e=>selectFile(e.target.files?.[0]||null)}/></label>{busy&&!preview&&<Loading/>}{preview&&<><div className="import-summary"><b>{preview.total}개 항목</b><span className="tag">정상 {preview.valid}개</span>{preview.errors.length>0&&<span className="tag error-tag">오류 {preview.errors.length}개</span>}</div>{preview.items.length>0&&<div className="import-preview"><table><thead><tr><th>이름</th><th>DB 종류</th><th>호스트</th><th>포트</th><th>데이터베이스</th><th>SSH</th></tr></thead><tbody>{preview.items.map((item:any)=><tr key={`${item.name}-${item.host}`}><td>{item.name}</td><td>{item.db_type}</td><td>{item.host}</td><td>{item.port||'—'}</td><td>{item.database||'—'}</td><td>{item.ssh_enabled?'사용':'—'}</td></tr>)}</tbody></table></div>}{preview.errors.length>0&&<div className="import-errors">{preview.errors.map((item:any)=><p key={item.row}>행 {item.row}: {item.error}</p>)}</div>}<label>중복 이름 처리<select value={duplicate} onChange={e=>setDuplicate(e.target.value)}><option value="skip">건너뛰기</option><option value="overwrite">기존 연결 덮어쓰기</option><option value="rename">이름 뒤에 번호 붙이기</option></select></label></>}</div>{error&&<div className="alert"><CircleAlert size={16}/>{error}</div>}<div className="modal-actions"><button type="button" className="ghost" onClick={onClose}>취소</button><button type="button" className="primary" disabled={!preview||!preview.valid||busy} onClick={submit}>{busy&&<RefreshCw className="spin" size={16}/>}Import 실행</button></div></Modal>
 }
 
 function Sources({ toast }: { toast: (m: string) => void }) {
   const { data, loading, reload } = useLoad<Source[]>('/api/sources', [], [])
   const capabilities = useLoad<Capabilities>('/api/capabilities', { deployment_mode: 'local', supported_db_types: Object.keys(dbNames), excluded_db_types: [] }, [])
-  const [open, setOpen] = useState(false); const [query, setQuery] = useState('')
+  const [open, setOpen] = useState(false); const [importOpen, setImportOpen] = useState(false); const [guideOpen, setGuideOpen] = useState(false); const [query, setQuery] = useState('')
   const filtered = data.filter(s => `${s.name} ${s.host} ${s.database}`.toLowerCase().includes(query.toLowerCase()))
   const test = async (id: number) => { try { await api(`/api/sources/${id}/test`, { method: 'POST' }); toast('데이터베이스 연결에 성공했습니다.'); reload() } catch(e) { toast((e as Error).message) } }
   const remove = async (id: number) => { if (!confirm('데이터 소스와 연결된 수집 작업을 삭제할까요?')) return; await api(`/api/sources/${id}`, { method: 'DELETE' }); reload() }
-  return <><PageHead eyebrow="DATA MANAGEMENT" title="DB 접속 관리" description="메타데이터를 수집할 데이터베이스 연결과 인증 방식을 관리합니다." action={<button className="primary" onClick={() => setOpen(true)}><Plus size={17}/>새 연결</button>}/>
-    <section className="panel"><div className="toolbar"><div className="search"><Search size={17}/><input placeholder="연결 이름, 호스트 검색" value={query} onChange={e => setQuery(e.target.value)}/></div><span className="count">총 {data.length}개 연결</span></div>{loading ? <Loading/> : filtered.length ? <div className="cards">{filtered.map(s => <article className="source-card" key={s.id}><div className="source-top"><div className={`db-logo db-${s.db_type}`}>{dbNames[s.db_type]?.slice(0,2) || 'DB'}</div><div><h3>{s.name}</h3><p>{dbNames[s.db_type]}</p></div><Status value={s.status}/></div><dl><div><dt>엔드포인트</dt><dd>{s.db_type === 'sqlite' ? s.database : `${s.host}:${s.port}`}</dd></div><div><dt>데이터베이스</dt><dd>{s.database || '—'}</dd></div><div><dt>인증</dt><dd>{s.ssh_enabled ? <><KeyRound size={14}/> SSH {s.ssh_auth_type === 'private_key' ? '개인키' : '비밀번호'}</> : <><LockKeyhole size={14}/> DB 인증</>}</dd></div><div><dt>최근 테스트</dt><dd>{fmt(s.last_tested_at)}</dd></div></dl><div className="card-actions"><button onClick={() => test(s.id)}><Zap size={15}/>연결 테스트</button><button className="danger-icon" onClick={() => remove(s.id)} title="삭제"><Trash2 size={16}/></button></div></article>)}</div> : <Empty title="등록된 데이터베이스가 없습니다" text="새 연결을 추가하면 스키마 메타데이터 수집을 시작할 수 있습니다."/>}</section>{open && <SourceForm supportedDbTypes={capabilities.data.supported_db_types.filter(type => dbNames[type])} onClose={() => setOpen(false)} onDone={() => { setOpen(false); reload(); toast('데이터베이스 연결을 저장했습니다.') }}/>}</>
+  return <><PageHead eyebrow="DATA MANAGEMENT" title="DB 접속 관리" description="메타데이터를 수집할 데이터베이스 연결과 인증 방식을 관리합니다." action={<div className="source-actions"><button className="ghost" onClick={()=>setGuideOpen(true)}><BookOpen size={16}/>Import 가이드</button><button className="ghost" onClick={()=>setImportOpen(true)}><Upload size={16}/>일괄 Import</button><button className="primary" onClick={() => setOpen(true)}><Plus size={17}/>새 연결</button></div>}/>
+    <section className="panel"><div className="toolbar"><div className="search"><Search size={17}/><input placeholder="연결 이름, 호스트 검색" value={query} onChange={e => setQuery(e.target.value)}/></div><span className="count">총 {data.length}개 연결</span></div>{loading ? <Loading/> : filtered.length ? <div className="cards">{filtered.map(s => <article className="source-card" key={s.id}><div className="source-top"><div className={`db-logo db-${s.db_type}`}>{dbNames[s.db_type]?.slice(0,2) || 'DB'}</div><div><h3>{s.name}</h3><p>{dbNames[s.db_type]}</p></div><Status value={s.status}/></div><dl><div><dt>엔드포인트</dt><dd>{s.db_type === 'sqlite' ? s.database : `${s.host}:${s.port}`}</dd></div><div><dt>데이터베이스</dt><dd>{s.database || '—'}</dd></div><div><dt>인증</dt><dd>{s.ssh_enabled ? <><KeyRound size={14}/> SSH {s.ssh_auth_type === 'private_key' ? '개인키' : '비밀번호'}</> : <><LockKeyhole size={14}/> DB 인증</>}</dd></div><div><dt>최근 테스트</dt><dd>{fmt(s.last_tested_at)}</dd></div></dl><div className="card-actions"><button onClick={() => test(s.id)}><Zap size={15}/>연결 테스트</button><button className="danger-icon" onClick={() => remove(s.id)} title="삭제"><Trash2 size={16}/></button></div></article>)}</div> : <Empty title="등록된 데이터베이스가 없습니다" text="새 연결을 추가하면 스키마 메타데이터 수집을 시작할 수 있습니다."/>}</section>{open && <SourceForm supportedDbTypes={capabilities.data.supported_db_types.filter(type => dbNames[type])} onClose={() => setOpen(false)} onDone={() => { setOpen(false); reload(); toast('데이터베이스 연결을 저장했습니다.') }}/>} {importOpen&&<SourceImportDialog onClose={()=>setImportOpen(false)} onDone={message=>{setImportOpen(false);reload();toast(message)}}/>} {guideOpen&&<ImportGuide onClose={()=>setGuideOpen(false)}/>}</>
 }
 
 const COLLECTION_OPTIONS: [string, string][] = [['INDEX','인덱스'],['TABLE','테이블'],['VIEW','뷰'],['PROCEDURE','프로시저'],['SELECT PRIVILEGE','조회 권한'],['TRIGGER','트리거'],['TABLE PARTITION','테이블 파티션'],['INDEX PARTITION','인덱스 파티션'],['TABLE SUBPARTITION','테이블 서브파티션'],['INDEX SUBPARTITION','인덱스 서브파티션'],['MVIEW','Materialized View'],['SEQUENCE','시퀀스'],['DATABASE LINK','Database Link'],['SYNONYM','Synonym']]

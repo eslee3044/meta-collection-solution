@@ -1,10 +1,13 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import json
+import os
 import re
 from urllib.parse import quote
+from typing import Any
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+import yaml
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy import desc, func, inspect, select, text
@@ -19,7 +22,7 @@ from .capabilities import assert_supported_db_type
 from .collector import test_source
 from .scheduler import execute_job, start_scheduler, stop_scheduler, sync_jobs
 from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, PasswordChangeIn, RoleIn, RunOut, UserIn, UserOut
-from .security import create_token, encrypt_json, hash_password, verify_password
+from .security import create_token, decrypt_json, encrypt_json, hash_password, verify_password
 from .seed import seed
 
 
@@ -122,8 +125,10 @@ def apply_source(item: DataSource, payload: DataSourceIn) -> None:
         raise HTTPException(400, str(exc)) from exc
     for field in ["name", "db_type", "host", "port", "database", "username", "options", "ssh_enabled", "ssh_host", "ssh_port", "ssh_username", "ssh_auth_type"]:
         setattr(item, field, getattr(payload, field))
+    item.options = {**(payload.options or {}), "ssl_enabled": payload.ssl_enabled}
+    secret = decrypt_json(item.secret_encrypted) if item.secret_encrypted else {}
     if payload.password is not None:
-        item.secret_encrypted = encrypt_json({"password": payload.password})
+        secret["password"] = payload.password
     if payload.service_account_json is not None:
         try:
             credentials = json.loads(payload.service_account_json)
@@ -131,7 +136,16 @@ def apply_source(item: DataSource, payload: DataSourceIn) -> None:
             raise HTTPException(400, "서비스 계정 JSON 형식이 올바르지 않습니다.") from exc
         if not isinstance(credentials, dict) or not credentials.get("project_id") or not credentials.get("private_key"):
             raise HTTPException(400, "서비스 계정 JSON에 project_id와 private_key가 필요합니다.")
-        item.secret_encrypted = encrypt_json({"service_account": credentials})
+        secret["service_account"] = credentials
+    if payload.ssl_enabled:
+        for field in ["ssl_ca_cert", "ssl_cert", "ssl_key"]:
+            value = getattr(payload, field)
+            if value:
+                secret[field] = value
+    else:
+        for field in ["ssl_ca_cert", "ssl_cert", "ssl_key"]:
+            secret.pop(field, None)
+    item.secret_encrypted = encrypt_json(secret) if secret else ""
     if payload.db_type == "bigquery":
         if not item.secret_encrypted:
             raise HTTPException(400, "BigQuery 서비스 계정 JSON을 입력하세요.")
@@ -150,6 +164,100 @@ def apply_source(item: DataSource, payload: DataSourceIn) -> None:
 @app.get("/api/sources", response_model=list[DataSourceOut])
 def list_sources(session: Session = Depends(get_session), _: User = Depends(require("sources:read"))):
     return session.scalars(select(DataSource).order_by(DataSource.name)).all()
+
+
+def _resolve_import_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _resolve_import_values(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_resolve_import_values(item) for item in value]
+    if isinstance(value, str):
+        def replace(match: re.Match[str]) -> str:
+            variable = match.group(1)
+            resolved = os.getenv(variable)
+            if resolved is None:
+                raise ValueError(f"환경변수 {variable}가 설정되지 않았습니다.")
+            return resolved
+        return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", replace, value)
+    return value
+
+
+def _parse_source_import(filename: str, content: bytes) -> list[dict[str, Any]]:
+    if len(content) > 2 * 1024 * 1024:
+        raise HTTPException(413, "Import 파일은 2MB 이하만 지원합니다.")
+    suffix = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    try:
+        text_content = content.decode("utf-8-sig")
+        document = json.loads(text_content) if suffix == "json" else yaml.safe_load(text_content)
+    except (UnicodeDecodeError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        raise HTTPException(400, "유효한 UTF-8 JSON 또는 YAML 파일이 아닙니다.") from exc
+    if isinstance(document, dict):
+        document = document.get("connections")
+    if not isinstance(document, list) or not document:
+        raise HTTPException(400, "최상위 connections 배열이 필요합니다.")
+    try:
+        return [_resolve_import_values(item) for item in document]
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+_IMPORT_SECRET_FIELDS = {"password", "service_account_json", "ssl_ca_cert", "ssl_cert", "ssl_key", "ssh_password", "ssh_private_key", "ssh_private_key_passphrase"}
+
+
+def _preview_source_item(item: dict[str, Any]) -> dict[str, Any]:
+    safe = dict(item)
+    for key in _IMPORT_SECRET_FIELDS:
+        if key in safe and safe[key]:
+            safe[key] = "[REDACTED]"
+    return {"name": safe.get("name"), "db_type": safe.get("db_type"), "host": safe.get("host"), "port": safe.get("port"), "database": safe.get("database"), "username": safe.get("username"), "ssh_enabled": bool(safe.get("ssh_enabled") or (safe.get("ssh") or {}).get("enabled"))}
+
+
+@app.post("/api/sources/import/preview")
+async def preview_sources_import(file: UploadFile = File(...), _: User = Depends(require("sources:write"))):
+    items = _parse_source_import(file.filename or "connections.yaml", await file.read())
+    validated = []
+    errors = []
+    for index, raw in enumerate(items, start=1):
+        try:
+            if isinstance(raw.get("ssh"), dict):
+                raw = {**raw, **{f"ssh_{key}": value for key, value in raw["ssh"].items() if key != "enabled"}, "ssh_enabled": raw["ssh"].get("enabled", True)}
+            validated.append(_preview_source_item(DataSourceIn.model_validate(raw).model_dump(exclude_none=True)))
+        except Exception as exc:
+            errors.append({"row": index, "error": str(exc)[:500]})
+    return {"total": len(items), "valid": len(validated), "errors": errors, "items": validated}
+
+
+@app.post("/api/sources/import")
+async def import_sources(file: UploadFile = File(...), duplicate: str = Query("skip", pattern="^(skip|overwrite|rename)$"), session: Session = Depends(get_session), _: User = Depends(require("sources:write"))):
+    items = _parse_source_import(file.filename or "connections.yaml", await file.read())
+    result = {"created": 0, "updated": 0, "skipped": 0, "errors": []}
+    for index, raw in enumerate(items, start=1):
+        try:
+            if isinstance(raw.get("ssh"), dict):
+                raw = {**raw, **{f"ssh_{key}": value for key, value in raw["ssh"].items() if key != "enabled"}, "ssh_enabled": raw["ssh"].get("enabled", True)}
+            payload = DataSourceIn.model_validate(raw)
+            existing = session.scalar(select(DataSource).where(DataSource.name == payload.name))
+            if existing and duplicate == "skip":
+                result["skipped"] += 1
+                continue
+            if existing and duplicate == "overwrite":
+                apply_source(existing, payload)
+                result["updated"] += 1
+                continue
+            if existing and duplicate == "rename":
+                base = payload.name
+                suffix = 2
+                while session.scalar(select(DataSource).where(DataSource.name == f"{base} ({suffix})")):
+                    suffix += 1
+                payload = payload.model_copy(update={"name": f"{base} ({suffix})"})
+            item = DataSource()
+            apply_source(item, payload)
+            session.add(item)
+            result["created"] += 1
+        except Exception as exc:
+            result["errors"].append({"row": index, "error": str(exc)[:500]})
+    session.commit()
+    return result
 
 
 @app.post("/api/sources", response_model=DataSourceOut, status_code=201)
