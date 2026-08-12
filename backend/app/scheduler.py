@@ -9,7 +9,7 @@ from .capabilities import is_supported_db_type
 from .collector import collect_schema
 from .config import get_settings
 from .database import SessionLocal
-from .models import CollectionJob, CollectionRun, SchemaSnapshot
+from .models import CollectionJob, CollectionRun, RunLog, SchemaSnapshot
 
 
 scheduler = BackgroundScheduler(
@@ -27,9 +27,24 @@ def execute_job(job_id: int) -> int:
         run = CollectionRun(job_id=job.id, status="running")
         session.add(run)
         session.commit()
+        sequence = 0
+        current_step = "initializing"
+
+        def log(level: str, step: str, message: str, details: str | None = None) -> None:
+            nonlocal sequence
+            sequence += 1
+            session.add(RunLog(run_id=run.id, sequence=sequence, level=level, step=step, message=message[:1000], details=details[:4000] if details else None))
+            session.commit()
+
         try:
+            current_step = "connect"
+            log("info", "connect", "데이터 소스 연결을 시작합니다.")
+            current_step = "collect_schema"
+            log("info", "collect_schema", "스키마 메타데이터 수집을 시작합니다.")
             payload, count, fingerprint = collect_schema(job.data_source, job.schemas, job.collect_storage, job.collection_items)
             if job.collect_storage:
+                current_step = "storage_growth"
+                log("info", "storage_growth", "스토리지 증감량을 계산합니다.")
                 previous = session.scalar(
                     select(SchemaSnapshot)
                     .where(SchemaSnapshot.data_source_id == job.data_source_id)
@@ -37,10 +52,14 @@ def execute_job(job_id: int) -> int:
                     .limit(1)
                 )
                 apply_storage_growth(payload, previous.payload if previous else None)
+            current_step = "save_snapshot"
+            log("info", "save_snapshot", f"수집 결과를 저장합니다. 객체 {count}개")
             session.add(SchemaSnapshot(data_source_id=job.data_source_id, run_id=run.id, payload=payload, fingerprint=fingerprint))
             run.status, run.object_count = "success", count
+            log("info", "complete", "수집이 정상적으로 완료되었습니다.")
         except Exception as exc:
             run.status, run.error_message = "failed", str(exc)[:4000]
+            log("error", current_step, f"수집 중 오류가 발생했습니다: {current_step}", str(exc))
         finally:
             run.finished_at = datetime.now(timezone.utc)
             session.commit()

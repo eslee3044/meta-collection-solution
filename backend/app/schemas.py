@@ -41,6 +41,10 @@ class DataSourceIn(BaseModel):
     password: str | None = None
     service_account_json: str | None = None
     options: dict[str, Any] = {}
+    ssl_enabled: bool = False
+    ssl_ca_cert: str | None = None
+    ssl_cert: str | None = None
+    ssl_key: str | None = None
     ssh_enabled: bool = False
     ssh_host: str | None = None
     ssh_port: int = 22
@@ -108,6 +112,18 @@ class RunOut(BaseModel):
     finished_at: datetime | None
     object_count: int
     error_message: str | None
+
+
+class RunLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    run_id: int
+    sequence: int
+    level: str
+    step: str
+    message: str
+    details: str | None
+    created_at: datetime
 
 
 class UserIn(BaseModel):

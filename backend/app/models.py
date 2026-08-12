@@ -126,6 +126,20 @@ class CollectionRun(Base):
     object_count: Mapped[int] = mapped_column(default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     job: Mapped[CollectionJob] = relationship(back_populates="runs")
+    logs: Mapped[list["RunLog"]] = relationship(back_populates="run", cascade="all, delete-orphan", order_by="RunLog.sequence")
+
+
+class RunLog(Base):
+    __tablename__ = "run_logs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("collection_runs.id", ondelete="CASCADE"), index=True)
+    sequence: Mapped[int] = mapped_column(default=0, index=True)
+    level: Mapped[str] = mapped_column(String(20), default="info")
+    step: Mapped[str] = mapped_column(String(80), default="unknown")
+    message: Mapped[str] = mapped_column(Text)
+    details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    run: Mapped[CollectionRun] = relationship(back_populates="logs")
 
 
 class SchemaSnapshot(Base):

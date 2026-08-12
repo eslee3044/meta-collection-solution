@@ -17,11 +17,11 @@ from .config import get_settings
 from .database import Base, SessionLocal, engine, get_session
 from .dependencies import current_user, require
 from .excel_export import build_schema_workbook
-from .models import CollectionJob, CollectionRun, DataSource, Menu, Permission, Role, SchemaSnapshot, User
+from .models import CollectionJob, CollectionRun, DataSource, Menu, Permission, Role, RunLog, SchemaSnapshot, User
 from .capabilities import assert_supported_db_type
-from .collector import test_source
+from .collector import available_schema_names, test_source
 from .scheduler import execute_job, start_scheduler, stop_scheduler, sync_jobs
-from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, PasswordChangeIn, RoleIn, RunOut, UserIn, UserOut
+from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut
 from .security import create_token, decrypt_json, encrypt_json, hash_password, verify_password
 from .seed import seed
 
@@ -264,6 +264,17 @@ async def import_sources(file: UploadFile = File(...), duplicate: str = Query("s
     return result
 
 
+@app.get("/api/sources/{source_id}/schemas", response_model=list[str])
+def list_source_schemas(source_id: int, session: Session = Depends(get_session), _: User = Depends(require("sources:read"))):
+    source = session.get(DataSource, source_id)
+    if not source:
+        raise HTTPException(404, "데이터 소스를 찾을 수 없습니다.")
+    try:
+        return available_schema_names(source)
+    except Exception as exc:
+        raise HTTPException(400, f"스키마 목록을 불러오지 못했습니다: {str(exc)[:300]}") from exc
+
+
 @app.post("/api/sources", response_model=DataSourceOut, status_code=201)
 def create_source(payload: DataSourceIn, session: Session = Depends(get_session), _: User = Depends(require("sources:write"))):
     item = DataSource()
@@ -430,6 +441,13 @@ def delete_job(job_id: int, session: Session = Depends(get_session), _: User = D
 @app.get("/api/runs", response_model=list[RunOut])
 def list_runs(session: Session = Depends(get_session), _: User = Depends(require("jobs:read"))):
     return session.scalars(select(CollectionRun).order_by(desc(CollectionRun.started_at)).limit(100)).all()
+
+
+@app.get("/api/runs/{run_id}/logs", response_model=list[RunLogOut])
+def list_run_logs(run_id: int, session: Session = Depends(get_session), _: User = Depends(require("jobs:read"))):
+    if not session.get(CollectionRun, run_id):
+        raise HTTPException(404, "수집 실행 기록을 찾을 수 없습니다.")
+    return session.scalars(select(RunLog).where(RunLog.run_id == run_id).order_by(RunLog.sequence, RunLog.created_at)).all()
 
 
 @app.get("/api/metadata")
