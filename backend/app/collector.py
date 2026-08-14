@@ -267,7 +267,7 @@ def _collect_procedures(connection: Connection, source: DataSource, schema_name:
         "mysql": "SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS routine_type, DTD_IDENTIFIER AS return_type, ROUTINE_DEFINITION AS definition FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = :schema",
         "mariadb": "SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS routine_type, DTD_IDENTIFIER AS return_type, ROUTINE_DEFINITION AS definition FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = :schema",
         "mssql": "SELECT o.name, o.type_desc AS routine_type, OBJECT_DEFINITION(o.object_id) AS definition FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE s.name = :schema AND o.type IN ('P', 'PC', 'FN', 'IF', 'TF')",
-        "oracle": "SELECT object_name AS name, object_type AS routine_type FROM all_procedures WHERE owner = :schema AND object_type IN ('PROCEDURE', 'FUNCTION', 'PACKAGE')",
+        "oracle": "SELECT p.object_name AS name, p.object_type AS routine_type, LISTAGG(s.text, CHR(10)) WITHIN GROUP (ORDER BY s.line) AS definition FROM all_procedures p LEFT JOIN all_source s ON s.owner = p.owner AND s.name = p.object_name AND s.type = CASE WHEN p.object_type = 'PACKAGE' THEN 'PACKAGE BODY' ELSE p.object_type END WHERE p.owner = :schema AND p.object_type IN ('PROCEDURE', 'FUNCTION', 'PACKAGE') GROUP BY p.object_name, p.object_type",
         "db2": "SELECT ROUTINENAME AS name, ROUTINETYPE AS routine_type, TEXT AS definition FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = :schema",
     }
     if source.db_type in {"sqlite", "bigquery"}:

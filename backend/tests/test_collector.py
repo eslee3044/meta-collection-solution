@@ -8,6 +8,30 @@ from app.models import DataSource
 from app.scheduler import apply_storage_growth
 
 
+def test_oracle_procedure_collection_includes_definition(monkeypatch):
+    from app import collector
+
+    captured = {}
+
+    class FakeConnection:
+        def execute(self, statement, params):
+            captured["query"] = str(statement)
+            captured["params"] = params
+
+            class Result:
+                def mappings(self):
+                    return [{"name": "SYNC_DATA", "routine_type": "PROCEDURE", "definition": "CREATE OR REPLACE PROCEDURE SYNC_DATA"}]
+
+            return Result()
+
+    source = DataSource(name="oracle", db_type="oracle", database="ORCL", host="db", username="reader")
+    rows = collector._collect_procedures(FakeConnection(), source, "APP")
+
+    assert rows[0]["definition"].startswith("CREATE OR REPLACE PROCEDURE")
+    assert "all_source" in captured["query"].lower()
+    assert captured["params"] == {"schema": "APP"}
+
+
 def test_sqlite_schema_collection(tmp_path: Path):
     db_path = tmp_path / "sample.db"
     engine = create_engine(f"sqlite:///{db_path}")
