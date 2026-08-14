@@ -61,6 +61,7 @@ def source_engine(source: DataSource) -> Iterator[Engine]:
     tunnel = None
     engine: Engine | None = None
     key_file: Path | None = None
+    ssl_files: list[Path] = []
     host, port = source.host, source.port or DEFAULT_PORTS.get(source.db_type)
     try:
         if source.ssh_enabled:
@@ -83,7 +84,28 @@ def source_engine(source: DataSource) -> Iterator[Engine]:
             tunnel.start()
             host, port = "127.0.0.1", tunnel.local_bind_port
         options = source.options or {}
-        engine_options = {"pool_pre_ping": True, "connect_args": options.get("connect_args", {})}
+        connect_args = dict(options.get("connect_args", {}))
+        if options.get("ssl_enabled") and source.db_type in {"mysql", "mariadb", "postgresql"}:
+            secret = decrypt_json(source.secret_encrypted)
+            certs = {"ca": secret.get("ssl_ca_cert"), "cert": secret.get("ssl_cert"), "key": secret.get("ssl_key")}
+            for label, contents in certs.items():
+                if not contents:
+                    continue
+                handle = tempfile.NamedTemporaryFile("w", suffix=f".{label}", delete=False, encoding="utf-8")
+                handle.write(contents)
+                handle.close()
+                ssl_files.append(Path(handle.name))
+                if source.db_type in {"mysql", "mariadb"}:
+                    connect_args.setdefault("ssl", {})[label] = str(ssl_files[-1])
+                elif label == "ca":
+                    connect_args["sslrootcert"] = str(ssl_files[-1])
+                elif label == "cert":
+                    connect_args["sslcert"] = str(ssl_files[-1])
+                elif label == "key":
+                    connect_args["sslkey"] = str(ssl_files[-1])
+            if source.db_type == "postgresql":
+                connect_args.setdefault("sslmode", "require")
+        engine_options = {"pool_pre_ping": True, "connect_args": connect_args}
         if source.db_type == "bigquery":
             secret = decrypt_json(source.secret_encrypted)
             credentials = secret.get("service_account")
@@ -98,6 +120,9 @@ def source_engine(source: DataSource) -> Iterator[Engine]:
             engine.dispose()
         if tunnel:
             tunnel.stop()
+        for path in ssl_files:
+            if path.exists():
+                path.unlink()
         if key_file and key_file.exists():
             key_file.unlink()
 
@@ -106,6 +131,17 @@ def test_source(source: DataSource) -> None:
     assert_supported_db_type(source.db_type)
     with source_engine(source) as engine, engine.connect() as connection:
         connection.execute(text("SELECT 1"))
+
+
+def available_schema_names(source: DataSource) -> list[str]:
+    with source_engine(source) as engine:
+        available = inspect(engine).get_schema_names()
+    configured_dataset = (source.options or {}).get("dataset") if source.db_type == "bigquery" else None
+    return sorted(set([configured_dataset] if configured_dataset else [
+        name for name in available
+        if name.lower() not in {"information_schema", "pg_catalog", "sys"}
+        and not (source.db_type == "db2" and name.upper().startswith("SYS"))
+    ]))
 
 
 def _storage_metrics(connection: Connection, source: DataSource, schema_name: str) -> dict[str, dict]:
