@@ -303,6 +303,21 @@ def delete_source(source_id: int, session: Session = Depends(get_session), _: Us
     session.commit()
 
 
+def _test_source_payload(payload: DataSourceIn) -> dict[str, str]:
+    item = DataSource()
+    apply_source(item, payload)
+    test_source(item)
+    return {"status": "connected"}
+
+
+@app.post("/api/sources/test")
+def test_unsaved_connection(payload: DataSourceIn, _: User = Depends(require("sources:write"))):
+    try:
+        return _test_source_payload(payload)
+    except Exception as exc:
+        raise HTTPException(400, f"접속 실패: {str(exc)[:500]}") from exc
+
+
 @app.post("/api/sources/{source_id}/test")
 def test_connection(source_id: int, session: Session = Depends(get_session), _: User = Depends(require("sources:write"))):
     item = session.get(DataSource, source_id)
