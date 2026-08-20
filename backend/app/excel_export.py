@@ -51,6 +51,10 @@ def build_schema_workbook(payload: dict[str, Any], captured_at: datetime, finger
     return output.getvalue()
 
 
+def _join_values(values: Iterable[Any] | None) -> str:
+    return ", ".join("" if value is None else str(value) for value in (values or []))
+
+
 def _formats(workbook: xlsxwriter.Workbook) -> dict[str, Any]:
     row_border = {"bottom": 1, "bottom_color": "#E8ECF2"}
     return {
@@ -162,7 +166,7 @@ def _tables_sheet(workbook, formats, tables, include_storage: bool = True):
     sheet = _base_sheet(workbook, "테이블", headers, widths, formats)
     for row, (schema, table) in enumerate(tables, start=1):
         storage = table.get("storage") or {}
-        values = [schema.get("name"), table.get("name"), table.get("comment"), len(table.get("columns", [])), ", ".join(table.get("primary_key", {}).get("constrained_columns") or []), len(table.get("foreign_keys", [])), len(table.get("indexes", []))]
+        values = [schema.get("name"), table.get("name"), table.get("comment"), len(table.get("columns", [])), _join_values(table.get("primary_key", {}).get("constrained_columns")), len(table.get("foreign_keys", [])), len(table.get("indexes", []))]
         if include_storage:
             growth_percent = storage.get("growth_percent")
             values += [storage.get("data_bytes"), storage.get("index_bytes"), storage.get("total_bytes"), storage.get("growth_bytes"), growth_percent / 100 if growth_percent is not None else None, storage.get("row_estimate")]
@@ -199,7 +203,7 @@ def _indexes_sheet(workbook, formats, tables):
     row = 1
     for schema, table in tables:
         for index in table.get("indexes", []):
-            _write_row(sheet, row, [schema.get("name"), table.get("name"), index.get("name"), ", ".join(index.get("column_names") or []), bool(index.get("unique"))], formats)
+            _write_row(sheet, row, [schema.get("name"), table.get("name"), index.get("name"), _join_values(index.get("column_names")), bool(index.get("unique"))], formats)
             row += 1
     _finish_table(sheet, row, len(headers))
 
@@ -210,7 +214,7 @@ def _foreign_keys_sheet(workbook, formats, tables):
     row = 1
     for schema, table in tables:
         for key in table.get("foreign_keys", []):
-            _write_row(sheet, row, [schema.get("name"), table.get("name"), key.get("name"), ", ".join(key.get("constrained_columns") or []), key.get("referred_schema"), key.get("referred_table"), ", ".join(key.get("referred_columns") or [])], formats)
+            _write_row(sheet, row, [schema.get("name"), table.get("name"), key.get("name"), _join_values(key.get("constrained_columns")), key.get("referred_schema"), key.get("referred_table"), _join_values(key.get("referred_columns"))], formats)
             row += 1
     _finish_table(sheet, row, len(headers))
 
@@ -234,7 +238,7 @@ def _permissions_sheet(workbook, formats, schemas):
         for object_type, objects in (("테이블", schema.get("tables", [])), ("뷰", schema.get("views", []))):
             for item in objects:
                 permission = item.get("permissions") or {}
-                _write_row(sheet, row, [schema.get("name"), object_type, item.get("name"), permission.get("select"), permission.get("checked_as"), ", ".join(permission.get("privileges") or [])], formats, wrap_columns={5})
+                _write_row(sheet, row, [schema.get("name"), object_type, item.get("name"), permission.get("select"), permission.get("checked_as"), _join_values(permission.get("privileges"))], formats, wrap_columns={5})
                 row += 1
     _finish_table(sheet, row, len(headers))
 
