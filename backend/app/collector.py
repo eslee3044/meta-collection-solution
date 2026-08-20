@@ -10,6 +10,7 @@ from urllib.parse import quote_plus
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sshtunnel import SSHTunnelForwarder
 
 from .models import DataSource
@@ -20,6 +21,15 @@ from .capabilities import assert_supported_db_type
 DEFAULT_PORTS = {"postgresql": 5432, "mysql": 3306, "mariadb": 3306, "mssql": 1433, "oracle": 1521, "db2": 50000}
 DEFAULT_COLLECTION_ITEMS = ("INDEX", "TABLE", "VIEW", "PROCEDURE", "SELECT PRIVILEGE")
 ALL_COLLECTION_ITEMS = ("INDEX", "TABLE", "VIEW", "PROCEDURE", "SELECT PRIVILEGE", "TRIGGER", "TABLE PARTITION", "INDEX PARTITION", "TABLE SUBPARTITION", "INDEX SUBPARTITION", "MVIEW", "SEQUENCE", "DATABASE LINK", "SYNONYM")
+SYSTEM_SCHEMAS = {"information_schema", "performance_schema", "mysql", "sys", "pg_catalog"}
+
+
+def _usable_schema_names(available: list[str], source: DataSource) -> list[str]:
+    return [
+        name for name in available
+        if name.lower() not in SYSTEM_SCHEMAS
+        and not (source.db_type == "db2" and name.upper().startswith("SYS"))
+    ]
 
 
 def _safe(call, default):
@@ -138,9 +148,7 @@ def available_schema_names(source: DataSource) -> list[str]:
         available = inspect(engine).get_schema_names()
     configured_dataset = (source.options or {}).get("dataset") if source.db_type == "bigquery" else None
     return sorted(set([configured_dataset] if configured_dataset else [
-        name for name in available
-        if name.lower() not in {"information_schema", "pg_catalog", "sys"}
-        and not (source.db_type == "db2" and name.upper().startswith("SYS"))
+        name for name in _usable_schema_names(available, source)
     ]))
 
 
@@ -302,44 +310,45 @@ def collect_schema(
         inspector = inspect(engine)
         available = inspector.get_schema_names()
         configured_dataset = (source.options or {}).get("dataset") if source.db_type == "bigquery" else None
-        schemas = selected_schemas or ([configured_dataset] if configured_dataset else [
-            name for name in available
-            if name.lower() not in {"information_schema", "pg_catalog", "sys"}
-            and not (source.db_type == "db2" and name.upper().startswith("SYS"))
-        ])
+        schemas = selected_schemas or ([configured_dataset] if configured_dataset else _usable_schema_names(available, source))
         result = {
             "source": source.name,
             "db_type": source.db_type,
             "database": source.database,
             "collection_options": {"items": sorted(items), "storage_growth": include_storage},
             "schemas": [],
+            "skipped_schemas": [],
         }
         count = 0
         for schema_name in schemas:
-            schema = {"name": schema_name, "tables": [], "views": [], "procedures": _collect_procedures(connection, source, schema_name) if "PROCEDURE" in items else []}
-            permissions = _collect_select_permissions(connection, source, schema_name) if "SELECT PRIVILEGE" in items else {}
-            storage_metrics = _storage_metrics(connection, source, schema_name) if include_storage else {}
-            for table_name in inspector.get_table_names(schema=schema_name) if "TABLE" in items else []:
-                table = {
-                    "name": table_name,
-                    "comment": (_safe(lambda: inspector.get_table_comment(table_name, schema=schema_name), {}) or {}).get("text"),
-                    "columns": inspector.get_columns(table_name, schema=schema_name),
-                    "primary_key": _safe(lambda: inspector.get_pk_constraint(table_name, schema=schema_name), {}),
-                    "foreign_keys": _safe(lambda: inspector.get_foreign_keys(table_name, schema=schema_name), []),
-                    "indexes": _safe(lambda: inspector.get_indexes(table_name, schema=schema_name), []) if "INDEX" in items else [],
-                    "unique_constraints": _safe(lambda: inspector.get_unique_constraints(table_name, schema=schema_name), []),
-                    "permissions": permissions.get(table_name, permissions.get("*", {"select": None, "privileges": [], "checked_as": "not_collected"})),
-                }
-                if include_storage:
-                    table["storage"] = storage_metrics.get(table_name, {"data_bytes": 0, "index_bytes": 0, "total_bytes": 0, "row_estimate": None})
-                for column in table["columns"]:
-                    column["type"] = str(column["type"])
-                schema["tables"].append(table)
-                count += 1
-            for view_name in inspector.get_view_names(schema=schema_name) if "VIEW" in items else []:
-                schema["views"].append({"name": view_name, "definition": inspector.get_view_definition(view_name, schema=schema_name), "permissions": permissions.get(view_name, permissions.get("*", {"select": None, "privileges": [], "checked_as": "not_collected"}))})
-                count += 1
-            count += len(schema["procedures"])
-            result["schemas"].append(schema)
+            try:
+                schema = {"name": schema_name, "tables": [], "views": [], "procedures": _collect_procedures(connection, source, schema_name) if "PROCEDURE" in items else []}
+                permissions = _collect_select_permissions(connection, source, schema_name) if "SELECT PRIVILEGE" in items else {}
+                storage_metrics = _storage_metrics(connection, source, schema_name) if include_storage else {}
+                for table_name in inspector.get_table_names(schema=schema_name) if "TABLE" in items else []:
+                    table = {
+                        "name": table_name,
+                        "comment": (_safe(lambda: inspector.get_table_comment(table_name, schema=schema_name), {}) or {}).get("text"),
+                        "columns": inspector.get_columns(table_name, schema=schema_name),
+                        "primary_key": _safe(lambda: inspector.get_pk_constraint(table_name, schema=schema_name), {}),
+                        "foreign_keys": _safe(lambda: inspector.get_foreign_keys(table_name, schema=schema_name), []),
+                        "indexes": _safe(lambda: inspector.get_indexes(table_name, schema=schema_name), []) if "INDEX" in items else [],
+                        "unique_constraints": _safe(lambda: inspector.get_unique_constraints(table_name, schema=schema_name), []),
+                        "permissions": permissions.get(table_name, permissions.get("*", {"select": None, "privileges": [], "checked_as": "not_collected"})),
+                    }
+                    if include_storage:
+                        table["storage"] = storage_metrics.get(table_name, {"data_bytes": 0, "index_bytes": 0, "total_bytes": 0, "row_estimate": None})
+                    for column in table["columns"]:
+                        column["type"] = str(column["type"])
+                    schema["tables"].append(table)
+                    count += 1
+                for view_name in inspector.get_view_names(schema=schema_name) if "VIEW" in items else []:
+                    schema["views"].append({"name": view_name, "definition": inspector.get_view_definition(view_name, schema=schema_name), "permissions": permissions.get(view_name, permissions.get("*", {"select": None, "privileges": [], "checked_as": "not_collected"}))})
+                    count += 1
+                count += len(schema["procedures"])
+                result["schemas"].append(schema)
+            except SQLAlchemyError:
+                result["skipped_schemas"].append({"name": schema_name, "reason": "접근 권한이 없거나 메타데이터를 조회할 수 없습니다."})
+                continue
     raw = json.dumps(result, sort_keys=True, default=str).encode()
     return result, count, hashlib.sha256(raw).hexdigest()
