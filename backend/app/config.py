@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     deployment_mode: str = "local"
     token_minutes: int = 480
     collection_workers: int = 8
+    integration_api_key: str = ""
 
     model_config = SettingsConfigDict(
         env_file=(Path(__file__).parents[2] / ".env", Path.cwd() / ".env"),

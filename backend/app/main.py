@@ -3,11 +3,12 @@ from datetime import datetime, timezone
 import json
 import os
 import re
+import secrets
 from urllib.parse import quote
 from typing import Any
 
 import yaml
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy import desc, func, inspect, select, text
@@ -17,12 +18,13 @@ from .config import get_settings
 from .database import Base, SessionLocal, engine, get_session
 from .dependencies import current_user, require
 from .excel_export import build_schema_workbook
+from .integration import ensure_integration_views, snapshot_diff, snapshot_summary
 from .models import CollectionJob, CollectionRun, DataSource, Menu, Permission, Role, RunLog, SchemaSnapshot, User
 from .capabilities import assert_supported_db_type
 from .collector import available_schema_names, test_source
 from .scheduler import execute_job, start_scheduler, stop_scheduler, sync_jobs
 from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut
-from .security import create_token, decrypt_json, encrypt_json, hash_password, verify_password
+from .security import create_token, decode_token, decrypt_json, encrypt_json, hash_password, verify_password
 from .seed import seed
 
 
@@ -35,9 +37,28 @@ def user_out(user: User) -> UserOut:
     )
 
 
+def integration_auth(
+    x_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+    session: Session = Depends(get_session),
+) -> User:
+    configured_key = get_settings().integration_api_key
+    if configured_key:
+        if not x_api_key or not secrets.compare_digest(x_api_key, configured_key):
+            raise HTTPException(status_code=401, detail="유효한 연계 API 키가 필요합니다.")
+        return session.scalar(select(User).where(User.is_active.is_(True)).order_by(User.id))
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Bearer 토큰 또는 연계 API 키가 필요합니다.")
+    user = session.get(User, decode_token(authorization[7:]))
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="사용할 수 없는 계정입니다.")
+    return user
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(engine)
+    ensure_integration_views(engine)
     columns = {column["name"] for column in inspect(engine).get_columns("collection_jobs")}
     if "collect_storage" not in columns:
         default = "FALSE" if engine.dialect.name == "postgresql" else "0"
@@ -474,6 +495,70 @@ def metadata(session: Session = Depends(get_session), _: User = Depends(require(
             result.append({"id": item.id, "data_source_id": item.data_source_id, "run_id": item.run_id, "captured_at": item.captured_at, "fingerprint": item.fingerprint, "payload": item.payload})
             seen.add(item.data_source_id)
     return result
+
+
+@app.get("/api/integration/v1/sources")
+def integration_sources(session: Session = Depends(get_session), _: User = Depends(integration_auth)):
+    return [{"id": source.id, "name": source.name, "db_type": source.db_type, "database": source.database, "status": source.status} for source in session.scalars(select(DataSource).order_by(DataSource.name)).all()]
+
+
+@app.get("/api/integration/v1/sources/{source_id}/snapshots")
+def integration_snapshot_history(source_id: int, limit: int = Query(100, ge=1, le=500), session: Session = Depends(get_session), _: User = Depends(integration_auth)):
+    source = session.get(DataSource, source_id)
+    if not source:
+        raise HTTPException(404, "데이터 소스를 찾을 수 없습니다.")
+    snapshots = session.scalars(select(SchemaSnapshot).where(SchemaSnapshot.data_source_id == source_id).order_by(desc(SchemaSnapshot.captured_at), desc(SchemaSnapshot.id)).limit(limit)).all()
+    return [snapshot_summary(snapshot) for snapshot in snapshots]
+
+
+@app.get("/api/integration/v1/snapshots/{snapshot_id}")
+def integration_snapshot(snapshot_id: int, session: Session = Depends(get_session), _: User = Depends(integration_auth)):
+    snapshot = session.get(SchemaSnapshot, snapshot_id)
+    if not snapshot:
+        raise HTTPException(404, "snapshot을 찾을 수 없습니다.")
+    return {**snapshot_summary(snapshot), "payload": snapshot.payload}
+
+
+@app.get("/api/integration/v1/sources/{source_id}/latest")
+def integration_latest_snapshot(source_id: int, session: Session = Depends(get_session), _: User = Depends(integration_auth)):
+    snapshot = session.scalar(select(SchemaSnapshot).where(SchemaSnapshot.data_source_id == source_id).order_by(desc(SchemaSnapshot.captured_at), desc(SchemaSnapshot.id)).limit(1))
+    if not snapshot:
+        raise HTTPException(404, "해당 데이터 소스의 snapshot이 없습니다.")
+    return {**snapshot_summary(snapshot), "payload": snapshot.payload}
+
+
+@app.get("/api/integration/v1/sources/{source_id}/diff")
+def integration_snapshot_diff(source_id: int, from_snapshot_id: int, to_snapshot_id: int, session: Session = Depends(get_session), _: User = Depends(integration_auth)):
+    before = session.get(SchemaSnapshot, from_snapshot_id)
+    after = session.get(SchemaSnapshot, to_snapshot_id)
+    if not before or not after or before.data_source_id != source_id or after.data_source_id != source_id:
+        raise HTTPException(404, "같은 데이터 소스의 유효한 snapshot 두 개가 필요합니다.")
+    return snapshot_diff(before, after)
+
+
+@app.get("/api/integration/v1/snapshots/{snapshot_id}/objects")
+def integration_snapshot_objects(snapshot_id: int, schema_name: str | None = None, kind: str | None = None, session: Session = Depends(get_session), _: User = Depends(integration_auth)):
+    snapshot = session.get(SchemaSnapshot, snapshot_id)
+    if not snapshot:
+        raise HTTPException(404, "snapshot을 찾을 수 없습니다.")
+    allowed = {"schema", "table", "column", "index", "view", "procedure"}
+    if kind and kind not in allowed:
+        raise HTTPException(400, f"kind는 {', '.join(sorted(allowed))} 중 하나여야 합니다.")
+    objects = []
+    payload = snapshot.payload or {}
+    for schema in payload.get("schemas", []):
+        if schema_name and schema.get("name") != schema_name:
+            continue
+        for object_kind, values in (("table", schema.get("tables", [])), ("view", schema.get("views", [])), ("procedure", schema.get("procedures", []))):
+            if not kind or kind == object_kind:
+                objects.extend({"kind": object_kind, "schema": schema.get("name"), **value} for value in values)
+            if object_kind == "table" and (not kind or kind in {"column", "index"}):
+                for table in values:
+                    if kind in (None, "column"):
+                        objects.extend({"kind": "column", "schema": schema.get("name"), "table": table.get("name"), **column} for column in table.get("columns", []))
+                    if kind in (None, "index"):
+                        objects.extend({"kind": "index", "schema": schema.get("name"), "table": table.get("name"), **index} for index in table.get("indexes", []))
+    return {"snapshot_id": snapshot.id, "captured_at": snapshot.captured_at, "objects": objects}
 
 
 @app.get("/api/metadata/{snapshot_id}/export.xlsx")

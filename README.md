@@ -52,3 +52,46 @@ npm run build
 ```
 
 API 문서는 백엔드 실행 후 `http://localhost:8000/docs`에서 확인할 수 있습니다.
+
+## 외부 시스템 연계
+
+MetaVault는 외부 시스템 연계를 위해 두 가지 읽기 전용 방식을 제공합니다.
+
+### 1. 연계 전용 REST API
+
+기본적으로 기존 관리자 토큰을 사용할 수 있으며, 운영 환경에서는 `.env`에 `METAVAULT_INTEGRATION_API_KEY`를 설정해 `X-API-Key` 방식으로 분리하는 것을 권장합니다. API 키 값 자체는 로그나 저장소에 기록하지 않습니다.
+
+```text
+GET /api/integration/v1/sources
+GET /api/integration/v1/sources/{source_id}/snapshots?limit=100
+GET /api/integration/v1/sources/{source_id}/latest
+GET /api/integration/v1/snapshots/{snapshot_id}
+GET /api/integration/v1/snapshots/{snapshot_id}/objects?schema_name=public&kind=table
+GET /api/integration/v1/sources/{source_id}/diff?from_snapshot_id=1&to_snapshot_id=2
+```
+
+`diff` 응답은 `added`, `removed`, `changed`로 구성되며 테이블·컬럼·인덱스·뷰·프로시저 변경을 포함합니다. API는 내부 DB 비밀번호나 암호화된 접속정보를 반환하지 않습니다.
+
+### 2. PostgreSQL 읽기 전용 뷰
+
+PostgreSQL 기동 시 다음 뷰가 `integration` 스키마에 자동 생성됩니다.
+
+```text
+integration.latest_snapshots
+integration.snapshot_history
+integration.schema_history
+integration.table_history
+integration.column_history
+```
+
+외부 계정에는 운영 테이블 전체 권한을 주지 말고 필요한 뷰에만 권한을 부여합니다.
+
+```sql
+CREATE USER metavault_reader WITH PASSWORD '[REDACTED]';
+GRANT USAGE ON SCHEMA integration TO metavault_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA integration TO metavault_reader;
+ALTER DEFAULT PRIVILEGES IN SCHEMA integration
+  GRANT SELECT ON TABLES TO metavault_reader;
+```
+
+운영 환경에서는 PostgreSQL 포트를 인터넷에 직접 공개하기보다 내부 네트워크, VPN 또는 읽기 전용 replica를 사용하는 것을 권장합니다.
