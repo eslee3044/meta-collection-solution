@@ -114,7 +114,10 @@ def source_engine(source: DataSource) -> Iterator[Engine]:
                 elif label == "key":
                     connect_args["sslkey"] = str(ssl_files[-1])
             if source.db_type == "postgresql":
-                connect_args.setdefault("sslmode", "require")
+                sslmode = options.get("sslmode", "require")
+                if sslmode not in {"require", "verify-ca", "verify-full"}:
+                    raise ValueError("지원하지 않는 PostgreSQL SSL 모드입니다.")
+                connect_args.setdefault("sslmode", sslmode)
         engine_options = {"pool_pre_ping": True, "connect_args": connect_args}
         if source.db_type == "bigquery":
             secret = decrypt_json(source.secret_encrypted)
