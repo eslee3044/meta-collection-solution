@@ -324,6 +324,13 @@ def delete_source(source_id: int, session: Session = Depends(get_session), _: Us
     session.commit()
 
 
+def _copy_source(item: DataSource) -> DataSource:
+    clone = DataSource()
+    for attribute in inspect(item).mapper.column_attrs:
+        setattr(clone, attribute.key, getattr(item, attribute.key))
+    return clone
+
+
 def _test_source_payload(payload: DataSourceIn) -> dict[str, str]:
     item = DataSource()
     apply_source(item, payload)
@@ -335,6 +342,20 @@ def _test_source_payload(payload: DataSourceIn) -> dict[str, str]:
 def test_unsaved_connection(payload: DataSourceIn, _: User = Depends(require("sources:write"))):
     try:
         return _test_source_payload(payload)
+    except Exception as exc:
+        raise HTTPException(400, f"접속 실패: {str(exc)[:500]}") from exc
+
+
+@app.post("/api/sources/{source_id}/test-edit")
+def test_edit_connection(source_id: int, payload: DataSourceIn, session: Session = Depends(get_session), _: User = Depends(require("sources:write"))):
+    item = session.get(DataSource, source_id)
+    if not item:
+        raise HTTPException(404, "데이터 소스를 찾을 수 없습니다.")
+    try:
+        draft = _copy_source(item)
+        apply_source(draft, payload)
+        test_source(draft)
+        return {"status": "connected"}
     except Exception as exc:
         raise HTTPException(400, f"접속 실패: {str(exc)[:500]}") from exc
 
