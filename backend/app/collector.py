@@ -290,9 +290,90 @@ def _collect_select_permissions(connection: Connection, source: DataSource, sche
     if source.db_type == "sqlite":
         return {"*": {"select": True, "privileges": ["SELECT"], "checked_as": source.username or "sqlite"}}
     queries = {
-        "postgresql": "SELECT table_name AS name FROM information_schema.role_table_grants WHERE table_schema = :schema AND privilege_type = 'SELECT' AND grantee = CURRENT_USER",
-        "mysql": "SELECT TABLE_NAME AS name FROM information_schema.TABLE_PRIVILEGES WHERE TABLE_SCHEMA = :schema AND PRIVILEGE_TYPE = 'SELECT' AND GRANTEE = CONCAT(\"'\", CURRENT_USER(), \"'\")",
-        "mariadb": "SELECT TABLE_NAME AS name FROM information_schema.TABLE_PRIVILEGES WHERE TABLE_SCHEMA = :schema AND PRIVILEGE_TYPE = 'SELECT' AND GRANTEE = CONCAT(\"'\", CURRENT_USER(), \"'\")",
+        "postgresql": """
+            SELECT table_name AS name
+            FROM information_schema.tables
+            WHERE table_schema = :schema
+              AND has_table_privilege(
+                    current_user,
+                    format('%I.%I', table_schema, table_name),
+                    'SELECT'
+                  )
+        """,
+        "mysql": """
+            SELECT TABLE_NAME AS name
+            FROM information_schema.TABLE_PRIVILEGES
+            WHERE TABLE_SCHEMA = :schema
+              AND PRIVILEGE_TYPE = 'SELECT'
+              AND GRANTEE IN (
+                    CONCAT(CHAR(39), CURRENT_USER(), CHAR(39)),
+                    CONCAT(CHAR(39), USER(), CHAR(39))
+                  )
+            UNION
+            SELECT t.TABLE_NAME AS name
+            FROM information_schema.TABLES t
+            WHERE t.TABLE_SCHEMA = :schema
+              AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.SCHEMA_PRIVILEGES p
+                    WHERE p.TABLE_SCHEMA = t.TABLE_SCHEMA
+                      AND p.PRIVILEGE_TYPE = 'SELECT'
+                      AND p.GRANTEE IN (
+                            CONCAT(CHAR(39), CURRENT_USER(), CHAR(39)),
+                            CONCAT(CHAR(39), USER(), CHAR(39))
+                          )
+                  )
+            UNION
+            SELECT t.TABLE_NAME AS name
+            FROM information_schema.TABLES t
+            WHERE t.TABLE_SCHEMA = :schema
+              AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.USER_PRIVILEGES p
+                    WHERE p.PRIVILEGE_TYPE = 'SELECT'
+                      AND p.GRANTEE IN (
+                            CONCAT(CHAR(39), CURRENT_USER(), CHAR(39)),
+                            CONCAT(CHAR(39), USER(), CHAR(39))
+                          )
+                  )
+        """,
+        "mariadb": """
+            SELECT TABLE_NAME AS name
+            FROM information_schema.TABLE_PRIVILEGES
+            WHERE TABLE_SCHEMA = :schema
+              AND PRIVILEGE_TYPE = 'SELECT'
+              AND GRANTEE IN (
+                    CONCAT(CHAR(39), CURRENT_USER(), CHAR(39)),
+                    CONCAT(CHAR(39), USER(), CHAR(39))
+                  )
+            UNION
+            SELECT t.TABLE_NAME AS name
+            FROM information_schema.TABLES t
+            WHERE t.TABLE_SCHEMA = :schema
+              AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.SCHEMA_PRIVILEGES p
+                    WHERE p.TABLE_SCHEMA = t.TABLE_SCHEMA
+                      AND p.PRIVILEGE_TYPE = 'SELECT'
+                      AND p.GRANTEE IN (
+                            CONCAT(CHAR(39), CURRENT_USER(), CHAR(39)),
+                            CONCAT(CHAR(39), USER(), CHAR(39))
+                          )
+                  )
+            UNION
+            SELECT t.TABLE_NAME AS name
+            FROM information_schema.TABLES t
+            WHERE t.TABLE_SCHEMA = :schema
+              AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.USER_PRIVILEGES p
+                    WHERE p.PRIVILEGE_TYPE = 'SELECT'
+                      AND p.GRANTEE IN (
+                            CONCAT(CHAR(39), CURRENT_USER(), CHAR(39)),
+                            CONCAT(CHAR(39), USER(), CHAR(39))
+                          )
+                  )
+        """,
         "mssql": "SELECT o.name FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE s.name = :schema AND o.type IN ('U', 'V') AND HAS_PERMS_BY_NAME(QUOTENAME(s.name) + '.' + QUOTENAME(o.name), 'OBJECT', 'SELECT') = 1",
         "oracle": "SELECT table_name AS name FROM all_tab_privs WHERE owner = :schema AND privilege = 'SELECT' AND (grantee = USER OR grantee = 'PUBLIC') UNION SELECT table_name AS name FROM all_tables WHERE owner = :schema AND owner = USER UNION SELECT view_name AS name FROM all_views WHERE owner = :schema AND owner = USER",
         "db2": "SELECT TABNAME AS name FROM SYSCAT.TABAUTH WHERE TABSCHEMA = :schema AND SELECTAUTH IN ('Y', 'G', 'A') AND (GRANTEE = CURRENT USER OR GRANTEETYPE = 'P')",
