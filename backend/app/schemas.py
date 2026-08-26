@@ -166,6 +166,7 @@ class MetaRegisterIn(BaseModel):
     tgt_database_name: str = Field(min_length=1, max_length=255)
     instance_div_cd: str = Field(default="", max_length=32)
     target_name_suffix: str = Field(default="", max_length=32)
+    columns_by_table: dict[str, list[str]] | None = None
 
 
 class MenuIn(BaseModel):
