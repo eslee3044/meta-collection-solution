@@ -154,7 +154,7 @@ class SchemaSnapshot(Base):
 
 class MetaTableExt(Base):
     __tablename__ = "TB_META_TABLES_EXT"
-    __table_args__ = {"quote": True}
+    __table_args__ = {"schema": "EAPET", "quote": True}
 
     system_cd: Mapped[str] = mapped_column(String(32), primary_key=True)
     instance_name: Mapped[str] = mapped_column(String(255), primary_key=True)
@@ -186,7 +186,7 @@ class MetaTableExt(Base):
 
 class MetaColumnExt(Base):
     __tablename__ = "TB_META_COLUMNS_EXT"
-    __table_args__ = {"quote": True}
+    __table_args__ = {"schema": "EAPET", "quote": True}
 
     system_cd: Mapped[str] = mapped_column(String(32), primary_key=True)
     instance_name: Mapped[str] = mapped_column(String(255), primary_key=True)
@@ -211,3 +211,13 @@ class MetaColumnExt(Base):
     createdby: Mapped[str | None] = mapped_column(String(255), nullable=True)
     lastupdated: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updatedby: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class MetaTableConfig(TimestampMixin, Base):
+    __tablename__ = "meta_table_config"
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    source_type: Mapped[str] = mapped_column(String(20), default="internal")
+    external_source_id: Mapped[int | None] = mapped_column(ForeignKey("data_sources.id", ondelete="SET NULL"), nullable=True)
+    schema_name: Mapped[str] = mapped_column(String(255), default="EAPET")
+    tables_table_name: Mapped[str] = mapped_column(String(255), default="TB_META_TABLES_EXT")
+    columns_table_name: Mapped[str] = mapped_column(String(255), default="TB_META_COLUMNS_EXT")

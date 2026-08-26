@@ -141,6 +141,20 @@ class RoleIn(BaseModel):
     menu_ids: list[int] = []
 
 
+class MetaTableConfigIn(BaseModel):
+    source_type: Literal["internal", "external"] = "internal"
+    external_source_id: int | None = None
+    schema_name: str = Field(default="EAPET", min_length=1, max_length=255)
+    tables_table_name: str = Field(default="TB_META_TABLES_EXT", min_length=1, max_length=255)
+    columns_table_name: str = Field(default="TB_META_COLUMNS_EXT", min_length=1, max_length=255)
+
+
+class MetaTableConfigOut(MetaTableConfigIn):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    updated_at: datetime
+
+
 class MenuIn(BaseModel):
     code: str = Field(min_length=2, max_length=80)
     label: str = Field(min_length=1, max_length=80)

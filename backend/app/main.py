@@ -19,11 +19,11 @@ from .database import Base, SessionLocal, engine, get_session
 from .dependencies import current_user, require
 from .excel_export import build_schema_workbook
 from .integration import ensure_integration_views, snapshot_diff, snapshot_summary
-from .models import CollectionJob, CollectionRun, DataSource, Menu, Permission, Role, RunLog, SchemaSnapshot, User
+from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaTableConfig, Permission, Role, RunLog, SchemaSnapshot, User
 from .capabilities import assert_supported_db_type
 from .collector import available_schema_names, test_source
 from .scheduler import execute_job, start_scheduler, stop_scheduler, sync_jobs
-from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut
+from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut
 from .security import create_token, decode_token, decrypt_json, encrypt_json, hash_password, verify_password
 from .seed import seed
 
@@ -57,6 +57,9 @@ def integration_auth(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    with engine.begin() as connection:
+        if engine.dialect.name == "postgresql":
+            connection.execute(text('CREATE SCHEMA IF NOT EXISTS "EAPET"'))
     Base.metadata.create_all(engine)
     ensure_integration_views(engine)
     columns = {column["name"] for column in inspect(engine).get_columns("collection_jobs")}
@@ -180,6 +183,42 @@ def apply_source(item: DataSource, payload: DataSourceIn) -> None:
             "private_key": payload.ssh_private_key,
             "private_key_passphrase": payload.ssh_private_key_passphrase,
         })
+
+
+@app.get("/api/meta-table-config", response_model=MetaTableConfigOut)
+def get_meta_table_config(session: Session = Depends(get_session), _: User = Depends(require("sources:read"))):
+    config = session.get(MetaTableConfig, 1)
+    if not config:
+        config = MetaTableConfig(id=1)
+        session.add(config)
+        session.commit()
+        session.refresh(config)
+    return config
+
+
+@app.put("/api/meta-table-config", response_model=MetaTableConfigOut)
+def update_meta_table_config(payload: MetaTableConfigIn, session: Session = Depends(get_session), _: User = Depends(require("sources:write"))):
+    identifier = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]*$")
+    for value, label in ((payload.schema_name, "스키마명"), (payload.tables_table_name, "테이블명"), (payload.columns_table_name, "테이블명")):
+        if not identifier.fullmatch(value):
+            raise HTTPException(400, f"{label}은 영문자, 숫자, _, $, #만 사용할 수 있으며 숫자로 시작할 수 없습니다.")
+    if payload.source_type == "external":
+        if payload.external_source_id is None:
+            raise HTTPException(400, "외부 DB를 선택해야 합니다.")
+        if not session.get(DataSource, payload.external_source_id):
+            raise HTTPException(404, "선택한 외부 DB 접속정보를 찾을 수 없습니다.")
+    config = session.get(MetaTableConfig, 1)
+    if not config:
+        config = MetaTableConfig(id=1)
+        session.add(config)
+    config.source_type = payload.source_type
+    config.external_source_id = payload.external_source_id if payload.source_type == "external" else None
+    config.schema_name = payload.schema_name
+    config.tables_table_name = payload.tables_table_name
+    config.columns_table_name = payload.columns_table_name
+    session.commit()
+    session.refresh(config)
+    return config
 
 
 @app.get("/api/sources", response_model=list[DataSourceOut])
