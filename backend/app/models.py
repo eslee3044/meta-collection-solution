@@ -150,3 +150,64 @@ class SchemaSnapshot(Base):
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
     fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+
+
+class MetaTableExt(Base):
+    __tablename__ = "TB_META_TABLES_EXT"
+    __table_args__ = {"quote": True}
+
+    system_cd: Mapped[str] = mapped_column(String(32), primary_key=True)
+    instance_name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    postfix: Mapped[str] = mapped_column(String(32), primary_key=True)
+    owner: Mapped[str] = mapped_column(String(255), primary_key=True)
+    table_name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    database_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    etl_conn_div_cd: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    etl_conn_nm: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    tgt_ds_cd: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    tgt_table_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    tgt_database_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    instance_div_cd: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    comments: Mapped[str | None] = mapped_column(Text, nullable=True)
+    createdon: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    createdby: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lastupdated: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updatedby: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sess_name_rule: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mapp_name_rule: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tgt_name_rule: Mapped[str | None] = mapped_column(Text, nullable=True)
+    partition_col_modifiable_yn: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    table_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    sql_insp_yn: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    sql_src_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sql_tgt_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sql_tgt_pk_dup: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class MetaColumnExt(Base):
+    __tablename__ = "TB_META_COLUMNS_EXT"
+    __table_args__ = {"quote": True}
+
+    system_cd: Mapped[str] = mapped_column(String(32), primary_key=True)
+    instance_name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    postfix: Mapped[str] = mapped_column(String(32), primary_key=True)
+    owner: Mapped[str] = mapped_column(String(255), primary_key=True)
+    table_name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    column_name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    column_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    data_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    data_length: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    data_precision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    data_scale: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    null_yn: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    pk_yn: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    partition_key_yn: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    cluster_key_yn: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    update_base_yn: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    to_single_byte_yn: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    substr_yn: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    comments: Mapped[str | None] = mapped_column(Text, nullable=True)
+    createdon: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    createdby: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lastupdated: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updatedby: Mapped[str | None] = mapped_column(String(255), nullable=True)
