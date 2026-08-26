@@ -19,11 +19,11 @@ from .database import Base, SessionLocal, engine, get_session
 from .dependencies import current_user, require
 from .excel_export import build_schema_workbook
 from .integration import ensure_integration_views, snapshot_diff, snapshot_summary
-from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaTableConfig, Permission, Role, RunLog, SchemaSnapshot, User
+from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaColumnExt, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
 from .capabilities import assert_supported_db_type
 from .collector import available_schema_names, test_source
 from .scheduler import execute_job, start_scheduler, stop_scheduler, sync_jobs
-from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut
+from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut
 from .security import create_token, decode_token, decrypt_json, encrypt_json, hash_password, verify_password
 from .seed import seed
 
@@ -544,6 +544,52 @@ def list_run_logs(run_id: int, session: Session = Depends(get_session), _: User 
     if not session.get(CollectionRun, run_id):
         raise HTTPException(404, "수집 실행 기록을 찾을 수 없습니다.")
     return session.scalars(select(RunLog).where(RunLog.run_id == run_id).order_by(RunLog.sequence, RunLog.created_at)).all()
+
+
+@app.post("/api/metadata/register")
+def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_session), _: User = Depends(require("metadata:write"))):
+    snapshot = session.get(SchemaSnapshot, payload.snapshot_id)
+    if not snapshot:
+        raise HTTPException(404, "선택한 수집 스냅샷을 찾을 수 없습니다.")
+    selected = set(payload.table_names)
+    available = {table["name"]: (schema["name"], table) for schema in snapshot.payload.get("schemas", []) for table in schema.get("tables", [])}
+    missing = sorted(selected - available.keys())
+    if missing:
+        raise HTTPException(400, f"수집 결과에 없는 테이블이 포함되어 있습니다: {', '.join(missing[:10])}")
+    source_database = snapshot.payload.get("database") or ""
+    table_count = column_count = 0
+    for table_name in payload.table_names:
+        schema_name, table = available[table_name]
+        target_name = f"{table_name}{payload.target_name_suffix}"
+        table_key = {"system_cd": payload.system_cd, "instance_name": snapshot.payload.get("source", ""), "postfix": payload.postfix, "owner": schema_name, "table_name": table_name}
+        target = session.get(MetaTableExt, tuple(table_key.values()))
+        if not target:
+            target = MetaTableExt(**table_key)
+            session.add(target)
+        for key, value in {"database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "table_type": "TABLE", "partition_col_modifiable_yn": "Y"}.items():
+            setattr(target, key, value)
+        table_count += 1
+        pk_names = set((table.get("primary_key") or {}).get("constrained_columns") or [])
+        for position, column in enumerate(table.get("columns", []), start=1):
+            column_name = str(column.get("name", ""))
+            if not column_name:
+                continue
+            column_key = {**table_key, "column_name": column_name}
+            target_column = session.get(MetaColumnExt, tuple(column_key.values()))
+            if not target_column:
+                target_column = MetaColumnExt(**column_key)
+                session.add(target_column)
+            target_column.column_id = int(column.get("ordinal_position") or position)
+            target_column.data_type = str(column.get("type") or "")
+            target_column.data_length = int(column["length"]) if str(column.get("length", "")).isdigit() else None
+            target_column.data_precision = int(column["precision"]) if str(column.get("precision", "")).isdigit() else None
+            target_column.data_scale = int(column["scale"]) if str(column.get("scale", "")).isdigit() else None
+            target_column.null_yn = "N" if column.get("nullable") is False else "Y"
+            target_column.pk_yn = "Y" if column_name in pk_names else "N"
+            target_column.comments = column.get("comment")
+            column_count += 1
+    session.commit()
+    return {"tables": table_count, "columns": column_count, "schema": "configured", "status": "registered"}
 
 
 @app.get("/api/metadata")

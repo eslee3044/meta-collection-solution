@@ -13,6 +13,7 @@ PERMISSIONS = {
     "jobs:read": "수집 작업 조회",
     "jobs:write": "수집 작업 관리 및 실행",
     "metadata:read": "스키마 메타데이터 조회",
+    "metadata:write": "메타 테이블 등록",
     "users:read": "사용자 조회",
     "users:write": "사용자 관리",
     "roles:read": "역할과 메뉴 조회",

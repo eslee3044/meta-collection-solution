@@ -155,6 +155,19 @@ class MetaTableConfigOut(MetaTableConfigIn):
     updated_at: datetime
 
 
+class MetaRegisterIn(BaseModel):
+    snapshot_id: int
+    table_names: list[str] = Field(min_length=1)
+    system_cd: str = Field(min_length=1, max_length=32)
+    postfix: str = Field(min_length=1, max_length=32)
+    etl_conn_div_cd: str = Field(min_length=1, max_length=32)
+    etl_conn_nm: str = Field(min_length=1, max_length=255)
+    tgt_ds_cd: str = Field(min_length=1, max_length=255)
+    tgt_database_name: str = Field(min_length=1, max_length=255)
+    instance_div_cd: str = Field(default="", max_length=32)
+    target_name_suffix: str = Field(default="", max_length=32)
+
+
 class MenuIn(BaseModel):
     code: str = Field(min_length=2, max_length=80)
     label: str = Field(min_length=1, max_length=80)
