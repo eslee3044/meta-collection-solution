@@ -583,8 +583,8 @@ def _meta_table_script(config: MetaTableConfig, db_type: str) -> str:
     schema = quote_ident(config.schema_name)
     table = quote_ident(config.tables_table_name)
     column = quote_ident(config.columns_table_name)
-    table_key = ",\\n        ".join(f"{quote_ident(name)} {varchar} NOT NULL" for name in ["system_cd", "instance_name", "postfix", "owner", "table_name"])
-    column_key = ",\\n        ".join(f"{quote_ident(name)} {varchar} NOT NULL" for name in ["system_cd", "instance_name", "postfix", "owner", "table_name", "column_name"])
+    table_key = ("," + chr(10) + "        ").join(f"{quote_ident(name)} {varchar} NOT NULL" for name in ["system_cd", "instance_name", "postfix", "owner", "table_name"])
+    column_key = ("," + chr(10) + "        ").join(f"{quote_ident(name)} {varchar} NOT NULL" for name in ["system_cd", "instance_name", "postfix", "owner", "table_name", "column_name"])
     table_extra = [("database_name", varchar), ("etl_conn_div_cd", varchar), ("etl_conn_nm", varchar), ("tgt_ds_cd", varchar), ("tgt_table_name", varchar), ("tgt_database_name", varchar), ("instance_div_cd", varchar), ("comments", "TEXT"), ("table_type", varchar), ("partition_col_modifiable_yn", "CHAR(1)")]
     column_extra = [("column_id", integer), ("data_type", varchar), ("data_length", integer), ("data_precision", integer), ("data_scale", integer), ("null_yn", "CHAR(1)"), ("pk_yn", "CHAR(1)"), ("comments", "TEXT")]
     lines = [f"CREATE SCHEMA IF NOT EXISTS {schema};", "", f"CREATE TABLE {schema}.{table} (", f"        {table_key},"]
