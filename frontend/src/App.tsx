@@ -258,7 +258,7 @@ function Metadata() {
   const [kind,setKind]=useState<'tables'|'views'|'procedures'>('tables')
   const [exportOpen,setExportOpen]=useState(false)
   const [registerOpen,setRegisterOpen]=useState(false)
-  const [page,setPage]=useState(1); const [pageSize,setPageSize]=useState(50)
+  const [page,setPage]=useState(1); const [pageSize,setPageSize]=useState(()=>{const saved=Number(localStorage.getItem('metavault.schemaPageSize')); return [25,50,100,200].includes(saved)?saved:50})
   const current=data.find(x=>x.id===(selected||data[0]?.id))
   const tables=useMemo(()=>current?.payload.schemas.flatMap((s:any)=>(s.tables||[]).map((t:any)=>({...t,schema:s.name})))||[],[current])
   const views=useMemo(()=>current?.payload.schemas.flatMap((s:any)=>(s.views||[]).map((v:any)=>({...v,schema:s.name})))||[],[current])
@@ -271,6 +271,7 @@ function Metadata() {
   const visibleItems=kind==='tables'?filteredTables:kind==='views'?filteredViews:filteredProcedures
   const pageCount=Math.max(1,Math.ceil(visibleItems.length/pageSize))
   const pagedItems=visibleItems.slice((page-1)*pageSize,page*pageSize)
+  useEffect(()=>{localStorage.setItem('metavault.schemaPageSize',String(pageSize))},[pageSize])
   useEffect(()=>{setPage(1)},[query,schemaFilter,kind,current?.id])
   const visibleSchemaCount=schemaFilter?1:(current?.payload.schemas?.length||0)
   const download = async (items: string[]) => {
@@ -291,13 +292,14 @@ function Metadata() {
 }
 
 function RegisteredMetadataPage() {
-  const [page, setPage] = useState(1); const [pageSize, setPageSize] = useState(50)
+  const [page, setPage] = useState(1); const [pageSize, setPageSize] = useState(()=>{const saved=Number(localStorage.getItem('metavault.registeredPageSize')); return [25,50,100,200].includes(saved)?saved:50})
   const [selected, setSelected] = useState<any>(null); const [original, setOriginal] = useState<any>(null); const [query, setQuery] = useState(''); const [sourceFilter, setSourceFilter] = useState<string|null>(null); const [message, setMessage] = useState('')
   const path = `/api/metadata/registered?page=${page}&page_size=${pageSize}&q=${encodeURIComponent(query)}${sourceFilter ? `&instance_name=${encodeURIComponent(sourceFilter)}` : ''}`
   const { data: response, loading } = useLoad<any>(path, { items: [], total: 0, pages: 0, sources: [] }, [path])
   const data = response.items || []; const total = response.total || 0; const pages = response.pages || 0
   const sources = response.sources || []; const sourceCounts = response.source_counts || {}
   const filtered = data
+  useEffect(() => { localStorage.setItem('metavault.registeredPageSize', String(pageSize)) }, [pageSize])
   useEffect(() => { setPage(1); setSelected(null) }, [query, sourceFilter])
   const choose = (table: any) => { const copy = JSON.parse(JSON.stringify(table)); setSelected(copy); setOriginal(JSON.parse(JSON.stringify(table))); setMessage('') }
   const update = (index: number, key: string, value: string) => setSelected((current: any) => ({ ...current, columns: current.columns.map((column: any, i: number) => i === index ? { ...column, [key]: ['column_id', 'data_length', 'data_precision', 'data_scale'].includes(key) ? (value === '' ? null : Number(value)) : value } : column) }))
