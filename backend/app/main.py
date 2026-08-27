@@ -12,6 +12,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPExcepti
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy import MetaData, Table, and_, desc, func, inspect, or_, select, text, update
+from sqlalchemy.exc import NoSuchTableError
 from sqlalchemy.orm import Session
 
 from .config import get_settings
@@ -546,6 +547,49 @@ def list_run_logs(run_id: int, session: Session = Depends(get_session), _: User 
     return session.scalars(select(RunLog).where(RunLog.run_id == run_id).order_by(RunLog.sequence, RunLog.created_at)).all()
 
 
+def _meta_table_script(config: MetaTableConfig, db_type: str) -> str:
+    if db_type in {"mysql", "mariadb"}:
+        quote_ident = lambda value: f"`{value.replace('`', '``')}`"
+        varchar = "VARCHAR(255)"
+        integer = "INT"
+    elif db_type == "mssql":
+        quote_ident = lambda value: f"[{value.replace(']', ']]')}]"
+        varchar = "VARCHAR(255)"
+        integer = "INT"
+    else:
+        quote_ident = lambda value: f'"{value.replace(chr(34), chr(34) * 2)}"'
+        varchar = "VARCHAR(255)"
+        integer = "INTEGER"
+    schema = quote_ident(config.schema_name)
+    table = quote_ident(config.tables_table_name)
+    column = quote_ident(config.columns_table_name)
+    table_key = ",\\n        ".join(f"{quote_ident(name)} {varchar} NOT NULL" for name in ["system_cd", "instance_name", "postfix", "owner", "table_name"])
+    column_key = ",\\n        ".join(f"{quote_ident(name)} {varchar} NOT NULL" for name in ["system_cd", "instance_name", "postfix", "owner", "table_name", "column_name"])
+    table_extra = [("database_name", varchar), ("etl_conn_div_cd", varchar), ("etl_conn_nm", varchar), ("tgt_ds_cd", varchar), ("tgt_table_name", varchar), ("tgt_database_name", varchar), ("instance_div_cd", varchar), ("comments", "TEXT"), ("table_type", varchar), ("partition_col_modifiable_yn", "CHAR(1)")]
+    column_extra = [("column_id", integer), ("data_type", varchar), ("data_length", integer), ("data_precision", integer), ("data_scale", integer), ("null_yn", "CHAR(1)"), ("pk_yn", "CHAR(1)"), ("comments", "TEXT")]
+    lines = [f"CREATE SCHEMA IF NOT EXISTS {schema};", "", f"CREATE TABLE {schema}.{table} (", f"        {table_key},"]
+    lines.extend(f"        {quote_ident(name)} {kind}," for name, kind in table_extra)
+    lines[-1] = lines[-1].rstrip(",")
+    lines.extend([f"        CONSTRAINT {quote_ident(config.tables_table_name + '_PK')} PRIMARY KEY ({', '.join(quote_ident(name) for name in ['system_cd', 'instance_name', 'postfix', 'owner', 'table_name'])})", ");", "", f"CREATE TABLE {schema}.{column} (", f"        {column_key},"])
+    lines.extend(f"        {quote_ident(name)} {kind}," for name, kind in column_extra)
+    lines[-1] = lines[-1].rstrip(",")
+    lines.extend([f"        CONSTRAINT {quote_ident(config.columns_table_name + '_PK')} PRIMARY KEY ({', '.join(quote_ident(name) for name in ['system_cd', 'instance_name', 'postfix', 'owner', 'table_name', 'column_name'])})", ");", ""])
+    return "\\n".join(lines)
+
+
+@app.get("/api/metadata/register-script")
+def metadata_register_script(session: Session = Depends(get_session), _: User = Depends(require("metadata:write"))):
+    config = session.get(MetaTableConfig, 1)
+    if not config or config.source_type != "external" or config.external_source_id is None:
+        raise HTTPException(400, "외부 DB 메타 등록 설정이 없습니다.")
+    source = session.get(DataSource, config.external_source_id)
+    if not source:
+        raise HTTPException(404, "설정된 외부 DB 접속정보를 찾을 수 없습니다.")
+    content = _meta_table_script(config, source.db_type)
+    filename = f"metavault_meta_tables_{source.db_type}.sql"
+    return Response(content=content, media_type="text/sql; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
 def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapshot, source: DataSource, config: MetaTableConfig) -> tuple[int, int]:
     available = {table["name"]: (schema["name"], table) for schema in snapshot.payload.get("schemas", []) for table in schema.get("tables", [])}
     selected = set(payload.table_names)
@@ -555,8 +599,14 @@ def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapsho
     metadata = MetaData()
     try:
         with source_engine(source) as external_engine, external_engine.begin() as connection:
-            tables = Table(config.tables_table_name, metadata, schema=config.schema_name, autoload_with=connection)
-            columns = Table(config.columns_table_name, metadata, schema=config.schema_name, autoload_with=connection)
+            try:
+                tables = Table(config.tables_table_name, metadata, schema=config.schema_name, autoload_with=connection)
+            except NoSuchTableError as error:
+                raise HTTPException(409, f"META_TABLES_MISSING:{config.schema_name}.{config.tables_table_name}") from error
+            try:
+                columns = Table(config.columns_table_name, metadata, schema=config.schema_name, autoload_with=connection)
+            except NoSuchTableError as error:
+                raise HTTPException(409, f"META_TABLES_MISSING:{config.schema_name}.{config.columns_table_name}") from error
             table_columns = {column.name.lower(): column for column in tables.c}
             column_columns = {column.name.lower(): column for column in columns.c}
             table_keys = ["system_cd", "instance_name", "postfix", "owner", "table_name"]
