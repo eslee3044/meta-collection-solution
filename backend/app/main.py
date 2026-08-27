@@ -589,12 +589,12 @@ def _meta_table_script(config: MetaTableConfig, db_type: str) -> str:
     column_extra = [("column_id", integer), ("data_type", varchar), ("data_length", integer), ("data_precision", integer), ("data_scale", integer), ("null_yn", "CHAR(1)"), ("pk_yn", "CHAR(1)"), ("comments", "TEXT")]
     lines = [f"CREATE SCHEMA IF NOT EXISTS {schema};", "", f"CREATE TABLE {schema}.{table} (", f"        {table_key},"]
     lines.extend(f"        {quote_ident(name)} {kind}," for name, kind in table_extra)
-    lines[-1] = lines[-1].rstrip(",")
+    lines[-1] = lines[-1].rstrip(",") + ","
     lines.extend([f"        CONSTRAINT {quote_ident(config.tables_table_name + '_PK')} PRIMARY KEY ({', '.join(quote_ident(name) for name in ['system_cd', 'instance_name', 'postfix', 'owner', 'table_name'])})", ");", "", f"CREATE TABLE {schema}.{column} (", f"        {column_key},"])
     lines.extend(f"        {quote_ident(name)} {kind}," for name, kind in column_extra)
-    lines[-1] = lines[-1].rstrip(",")
+    lines[-1] = lines[-1].rstrip(",") + ","
     lines.extend([f"        CONSTRAINT {quote_ident(config.columns_table_name + '_PK')} PRIMARY KEY ({', '.join(quote_ident(name) for name in ['system_cd', 'instance_name', 'postfix', 'owner', 'table_name', 'column_name'])})", ");", ""])
-    return "\\n".join(lines)
+    return chr(10).join(lines)
 
 
 @app.get("/api/metadata/register-script")
