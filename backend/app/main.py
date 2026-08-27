@@ -11,7 +11,7 @@ import yaml
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from sqlalchemy import desc, func, inspect, select, text
+from sqlalchemy import desc, func, inspect, or_, select, text
 from sqlalchemy.orm import Session
 
 from .config import get_settings
@@ -593,14 +593,43 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
 
 
 @app.get("/api/metadata/registered")
-def registered_metadata(session: Session = Depends(get_session), _: User = Depends(require("metadata:read"))):
-    tables = session.scalars(select(MetaTableExt).order_by(MetaTableExt.owner, MetaTableExt.table_name)).all()
-    columns = session.scalars(select(MetaColumnExt).order_by(MetaColumnExt.owner, MetaColumnExt.table_name, MetaColumnExt.column_id)).all()
+def registered_metadata(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    q: str = Query("", max_length=100),
+    instance_name: str | None = Query(None, max_length=100),
+    session: Session = Depends(get_session),
+    _: User = Depends(require("metadata:read")),
+):
+    query = select(MetaTableExt)
+    search = q.strip()
+    if instance_name:
+        query = query.where(MetaTableExt.instance_name == instance_name)
+    if search:
+        pattern = f"%{search}%"
+        column_match = select(MetaColumnExt.table_name).where(
+            MetaColumnExt.system_cd == MetaTableExt.system_cd,
+            MetaColumnExt.instance_name == MetaTableExt.instance_name,
+            MetaColumnExt.postfix == MetaTableExt.postfix,
+            MetaColumnExt.owner == MetaTableExt.owner,
+            MetaColumnExt.table_name == MetaTableExt.table_name,
+            MetaColumnExt.column_name.ilike(pattern),
+        ).exists()
+        query = query.where(or_(MetaTableExt.instance_name.ilike(pattern), MetaTableExt.owner.ilike(pattern), MetaTableExt.table_name.ilike(pattern), column_match))
+    total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
+    tables = session.scalars(query.order_by(MetaTableExt.instance_name, MetaTableExt.owner, MetaTableExt.table_name).offset((page - 1) * page_size).limit(page_size)).all()
+    source_counts = {source: count for source, count in session.execute(select(MetaTableExt.instance_name, func.count()).group_by(MetaTableExt.instance_name)).all() if source}
+    if not tables:
+        return {"items": [], "total": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size, "sources": sorted(source_counts), "source_counts": source_counts}
+    keys = [(table.system_cd, table.instance_name, table.postfix, table.owner, table.table_name) for table in tables]
+    columns = session.scalars(select(MetaColumnExt).where(or_(*[ (MetaColumnExt.system_cd == key[0]) & (MetaColumnExt.instance_name == key[1]) & (MetaColumnExt.postfix == key[2]) & (MetaColumnExt.owner == key[3]) & (MetaColumnExt.table_name == key[4]) for key in keys ])).order_by(MetaColumnExt.column_id)).all()
     grouped: dict[tuple, list] = {}
     for column in columns:
         key = (column.system_cd, column.instance_name, column.postfix, column.owner, column.table_name)
         grouped.setdefault(key, []).append({"column_name": column.column_name, "column_id": column.column_id, "data_type": column.data_type, "data_length": column.data_length, "data_precision": column.data_precision, "data_scale": column.data_scale, "null_yn": column.null_yn, "pk_yn": column.pk_yn, "comments": column.comments})
-    return [{"system_cd": table.system_cd, "instance_name": table.instance_name, "postfix": table.postfix, "owner": table.owner, "table_name": table.table_name, "database_name": table.database_name, "etl_conn_div_cd": table.etl_conn_div_cd, "etl_conn_nm": table.etl_conn_nm, "tgt_ds_cd": table.tgt_ds_cd, "tgt_table_name": table.tgt_table_name, "tgt_database_name": table.tgt_database_name, "comments": table.comments, "columns": grouped.get((table.system_cd, table.instance_name, table.postfix, table.owner, table.table_name), [])} for table in tables]
+    items = [{"system_cd": table.system_cd, "instance_name": table.instance_name, "postfix": table.postfix, "owner": table.owner, "table_name": table.table_name, "database_name": table.database_name, "etl_conn_div_cd": table.etl_conn_div_cd, "etl_conn_nm": table.etl_conn_nm, "tgt_ds_cd": table.tgt_ds_cd, "tgt_table_name": table.tgt_table_name, "tgt_database_name": table.tgt_database_name, "comments": table.comments, "columns": grouped.get((table.system_cd, table.instance_name, table.postfix, table.owner, table.table_name), [])} for table in tables]
+    sources = sorted({source for source in session.scalars(select(MetaTableExt.instance_name).distinct()).all() if source})
+    return {"items": items, "total": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size, "sources": sources, "source_counts": source_counts}
 
 
 @app.put("/api/metadata/registered")
@@ -614,19 +643,29 @@ def update_registered_metadata(payload: dict, session: Session = Depends(get_ses
     for field in ("database_name", "etl_conn_div_cd", "etl_conn_nm", "tgt_ds_cd", "tgt_table_name", "tgt_database_name", "comments"):
         if field in payload:
             setattr(table, field, payload[field])
-    for item in payload.get("columns", []):
-        column_key = (*key, item.get("column_name"))
-        if not isinstance(column_key[-1], str) or not column_key[-1]:
+    items = payload.get("columns", [])
+    valid_items = []
+    for item in items:
+        column_name = item.get("column_name")
+        if not isinstance(column_name, str) or not column_name.strip():
             raise HTTPException(422, "컬럼명은 필수입니다.")
-        column = session.get(MetaColumnExt, column_key)
+        for field in ("column_id", "data_length", "data_precision", "data_scale"):
+            if field in item and item[field] is not None and (isinstance(item[field], bool) or not isinstance(item[field], int)):
+                raise HTTPException(422, f"{field}는 숫자만 입력할 수 있습니다.")
+        valid_items.append(item)
+    column_names = [item["column_name"] for item in valid_items]
+    columns = session.scalars(select(MetaColumnExt).where(
+        MetaColumnExt.system_cd == key[0], MetaColumnExt.instance_name == key[1], MetaColumnExt.postfix == key[2], MetaColumnExt.owner == key[3], MetaColumnExt.table_name == key[4], MetaColumnExt.column_name.in_(column_names)
+    )).all()
+    columns_by_name = {column.column_name: column for column in columns}
+    for item in valid_items:
+        column = columns_by_name.get(item["column_name"])
         if not column:
             continue
         for field in ("data_type", "null_yn", "pk_yn", "comments"):
             if field in item:
                 setattr(column, field, item[field])
         for field in ("column_id", "data_length", "data_precision", "data_scale"):
-            if field in item and item[field] is not None and (isinstance(item[field], bool) or not isinstance(item[field], int)):
-                raise HTTPException(422, f"{field}는 숫자만 입력할 수 있습니다.")
             if field in item:
                 setattr(column, field, item[field])
     session.commit()
