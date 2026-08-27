@@ -212,6 +212,23 @@ def _check_external_meta_tables(source: DataSource, config: MetaTableConfig) -> 
         raise HTTPException(502, f"외부 DB 메타 테이블 확인에 실패했습니다: {error}") from error
 
 
+@app.get("/api/meta-table-config/status")
+def meta_table_config_status(session: Session = Depends(get_session), _: User = Depends(require("sources:read"))):
+    config = session.get(MetaTableConfig, 1)
+    if not config or config.source_type != "external":
+        return {"status": "ready", "source_type": "internal", "missing_tables": []}
+    source = session.get(DataSource, config.external_source_id) if config.external_source_id else None
+    if not source:
+        return {"status": "error", "source_type": "external", "missing_tables": [], "message": "외부 DB 접속정보가 없습니다."}
+    try:
+        _check_external_meta_tables(source, config)
+        return {"status": "ready", "source_type": "external", "missing_tables": []}
+    except HTTPException as error:
+        if error.detail and str(error.detail).startswith("META_TABLES_MISSING:"):
+            return {"status": "missing", "source_type": "external", "missing_tables": [str(error.detail).split(":", 1)[1]]}
+        return {"status": "error", "source_type": "external", "missing_tables": [], "message": str(error.detail)}
+
+
 @app.put("/api/meta-table-config", response_model=MetaTableConfigOut)
 def update_meta_table_config(payload: MetaTableConfigIn, session: Session = Depends(get_session), _: User = Depends(require("sources:write"))):
     identifier = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]*$")
