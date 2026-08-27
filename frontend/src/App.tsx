@@ -162,10 +162,10 @@ function SourceImportDialog({ onClose, onDone }: { onClose: () => void; onDone: 
 function Sources({ toast }: { toast: (m: string) => void }) {
   const { data, loading, reload } = useLoad<Source[]>('/api/sources', [], [])
   const capabilities = useLoad<Capabilities>('/api/capabilities', { deployment_mode: 'local', supported_db_types: Object.keys(dbNames), excluded_db_types: [] }, [])
-  const [open, setOpen] = useState(false); const [editing, setEditing] = useState<Source|null>(null); const [importOpen, setImportOpen] = useState(false); const [guideOpen, setGuideOpen] = useState(false); const [configOpen, setConfigOpen] = useState(false); const [query, setQuery] = useState(''); const [dbFilter, setDbFilter] = useState('all'); const [page, setPage] = useState(1); const [pageSize, setPageSize] = useState(()=>{const saved=Number(localStorage.getItem('metavault.sourcesPageSize')); return [25,50,100,200].includes(saved)?saved:25})
+  const [open, setOpen] = useState(false); const [editing, setEditing] = useState<Source|null>(null); const [importOpen, setImportOpen] = useState(false); const [guideOpen, setGuideOpen] = useState(false); const [configOpen, setConfigOpen] = useState(false); const [query, setQuery] = useState(''); const [dbFilter, setDbFilter] = useState('all'); const [page, setPage] = useState(1); const [pageSize, setPageSize] = useState(()=>{const saved=Number(localStorage.getItem('metavault.pageSize')); return [25,50,100,200].includes(saved)?saved:25})
   const filtered = data.filter(s => (dbFilter === 'all' || s.db_type === dbFilter) && `${s.name} ${s.host} ${s.database}`.toLowerCase().includes(query.toLowerCase()))
   const pageCount=Math.max(1,Math.ceil(filtered.length/pageSize)); const pageStart=Math.max(1,Math.min(page-2,pageCount-4)); const pageEnd=Math.min(pageCount,pageStart+4); const pageNumbers=Array.from({length:pageEnd-pageStart+1},(_,index)=>pageStart+index); const pagedSources=filtered.slice((page-1)*pageSize,page*pageSize)
-  useEffect(()=>{localStorage.setItem('metavault.sourcesPageSize',String(pageSize))},[pageSize])
+  useEffect(()=>{localStorage.setItem('metavault.pageSize',String(pageSize))},[pageSize])
   useEffect(()=>{setPage(1)},[query,dbFilter,pageSize])
   const test = async (id: number) => { try { await api(`/api/sources/${id}/test`, { method: 'POST' }); toast('데이터베이스 연결에 성공했습니다.'); reload() } catch(e) { toast((e as Error).message) } }
   const remove = async (id: number) => { if (!confirm('데이터 소스와 연결된 수집 작업을 삭제할까요?')) return; await api(`/api/sources/${id}`, { method: 'DELETE' }); reload() }
@@ -261,7 +261,7 @@ function Metadata() {
   const [kind,setKind]=useState<'tables'|'views'|'procedures'>('tables')
   const [exportOpen,setExportOpen]=useState(false)
   const [registerOpen,setRegisterOpen]=useState(false)
-  const [page,setPage]=useState(1); const [pageSize,setPageSize]=useState(()=>{const saved=Number(localStorage.getItem('metavault.schemaPageSize')); return [25,50,100,200].includes(saved)?saved:50})
+  const [page,setPage]=useState(1); const [pageSize,setPageSize]=useState(()=>{const saved=Number(localStorage.getItem('metavault.pageSize')); return [25,50,100,200].includes(saved)?saved:25})
   const current=data.find(x=>x.id===(selected||data[0]?.id))
   const tables=useMemo(()=>current?.payload.schemas.flatMap((s:any)=>(s.tables||[]).map((t:any)=>({...t,schema:s.name})))||[],[current])
   const views=useMemo(()=>current?.payload.schemas.flatMap((s:any)=>(s.views||[]).map((v:any)=>({...v,schema:s.name})))||[],[current])
@@ -275,7 +275,7 @@ function Metadata() {
   const pageCount=Math.max(1,Math.ceil(visibleItems.length/pageSize))
   const pageStart=Math.max(1,Math.min(page-2,pageCount-4)); const pageEnd=Math.min(pageCount,pageStart+4); const pageNumbers=Array.from({length:pageEnd-pageStart+1},(_,index)=>pageStart+index)
   const pagedItems=visibleItems.slice((page-1)*pageSize,page*pageSize)
-  useEffect(()=>{localStorage.setItem('metavault.schemaPageSize',String(pageSize))},[pageSize])
+  useEffect(()=>{localStorage.setItem('metavault.pageSize',String(pageSize))},[pageSize])
   useEffect(()=>{setPage(1)},[query,schemaFilter,kind,current?.id])
   const visibleSchemaCount=schemaFilter?1:(current?.payload.schemas?.length||0)
   const download = async (items: string[]) => {
@@ -296,7 +296,7 @@ function Metadata() {
 }
 
 function RegisteredMetadataPage() {
-  const [page, setPage] = useState(1); const [pageSize, setPageSize] = useState(()=>{const saved=Number(localStorage.getItem('metavault.registeredPageSize')); return [25,50,100,200].includes(saved)?saved:50})
+  const [page, setPage] = useState(1); const [pageSize, setPageSize] = useState(()=>{const saved=Number(localStorage.getItem('metavault.pageSize')); return [25,50,100,200].includes(saved)?saved:25})
   const [selected, setSelected] = useState<any>(null); const [original, setOriginal] = useState<any>(null); const [query, setQuery] = useState(''); const [sourceFilter, setSourceFilter] = useState<string|null>(null); const [message, setMessage] = useState('')
   const path = `/api/metadata/registered?page=${page}&page_size=${pageSize}&q=${encodeURIComponent(query)}${sourceFilter ? `&instance_name=${encodeURIComponent(sourceFilter)}` : ''}`
   const { data: response, loading } = useLoad<any>(path, { items: [], total: 0, pages: 0, sources: [] }, [path])
@@ -304,7 +304,7 @@ function RegisteredMetadataPage() {
   const sources = response.sources || []; const sourceCounts = response.source_counts || {}
   const filtered = data
   const pageStart=Math.max(1,Math.min(page-2,pages-4)); const pageEnd=Math.min(pages,pageStart+4); const pageNumbers=Array.from({length:Math.max(0,pageEnd-pageStart+1)},(_,index)=>pageStart+index)
-  useEffect(() => { localStorage.setItem('metavault.registeredPageSize', String(pageSize)) }, [pageSize])
+  useEffect(() => { localStorage.setItem('metavault.pageSize', String(pageSize)) }, [pageSize])
   useEffect(() => { setPage(1); setSelected(null) }, [query, sourceFilter])
   const choose = (table: any) => { const copy = JSON.parse(JSON.stringify(table)); setSelected(copy); setOriginal(JSON.parse(JSON.stringify(table))); setMessage('') }
   const update = (index: number, key: string, value: string) => setSelected((current: any) => ({ ...current, columns: current.columns.map((column: any, i: number) => i === index ? { ...column, [key]: ['column_id', 'data_length', 'data_precision', 'data_scale'].includes(key) ? (value === '' ? null : Number(value)) : value } : column) }))
@@ -327,7 +327,7 @@ function RegisterMetadataDialog({ snapshot, onClose, onDone }: { snapshot: any; 
   const [expanded, setExpanded] = useState<string[]>([])
   const [query, setQuery] = useState('')
   const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(()=>{const saved=Number(localStorage.getItem('metavault.registerDialogPageSize')); return [25,50,100,200].includes(saved)?saved:50})
+  const [pageSize, setPageSize] = useState(()=>{const saved=Number(localStorage.getItem('metavault.pageSize')); return [25,50,100,200].includes(saved)?saved:25})
   const [error, setError] = useState('')
   const [form, setForm] = useState({ system_cd: '', postfix: 'N', etl_conn_div_cd: '', etl_conn_nm: '', tgt_ds_cd: '', tgt_database_name: '', instance_div_cd: '', target_name_suffix: '' })
   const filteredTables = tables.filter((table: any) => `${table.schema} ${table.name}`.toLowerCase().includes(query.trim().toLowerCase()))
@@ -335,7 +335,7 @@ function RegisterMetadataDialog({ snapshot, onClose, onDone }: { snapshot: any; 
   const pageStart = Math.max(1, Math.min(page - 2, pageCount - 4)); const pageEnd = Math.min(pageCount, pageStart + 4)
   const pageNumbers = Array.from({ length: pageEnd - pageStart + 1 }, (_, index) => pageStart + index)
   const pagedTables = filteredTables.slice((page - 1) * pageSize, page * pageSize)
-  useEffect(() => { localStorage.setItem('metavault.registerDialogPageSize', String(pageSize)) }, [pageSize])
+  useEffect(() => { localStorage.setItem('metavault.pageSize', String(pageSize)) }, [pageSize])
   useEffect(() => { setPage(1) }, [query, pageSize])
   const set = (key: string, value: string) => setForm(current => ({ ...current, [key]: value }))
   const submit = async (event: FormEvent) => { event.preventDefault(); setError(''); if (!selected.length) { setError('등록할 테이블을 하나 이상 선택하세요.'); return } if (selected.some(name => !(selectedColumns[name]?.length))) { setError('선택한 모든 테이블에서 컬럼을 하나 이상 선택하세요.'); return } try { const result = await api<any>('/api/metadata/register', { method: 'POST', body: JSON.stringify({ snapshot_id: snapshot.id, table_names: selected, columns_by_table: selectedColumns, ...form }) }); onDone(); alert(`메타 등록 완료: 테이블 ${result.tables}개, 컬럼 ${result.columns}개`) } catch (e) { setError((e as Error).message) } }
