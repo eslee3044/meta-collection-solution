@@ -197,6 +197,21 @@ def get_meta_table_config(session: Session = Depends(get_session), _: User = Dep
     return config
 
 
+def _check_external_meta_tables(source: DataSource, config: MetaTableConfig) -> None:
+    metadata = MetaData()
+    try:
+        with source_engine(source) as external_engine, external_engine.connect() as connection:
+            for table_name in (config.tables_table_name, config.columns_table_name):
+                try:
+                    Table(table_name, metadata, schema=config.schema_name, autoload_with=connection)
+                except NoSuchTableError as error:
+                    raise HTTPException(409, f"META_TABLES_MISSING:{config.schema_name}.{table_name}") from error
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(502, f"외부 DB 메타 테이블 확인에 실패했습니다: {error}") from error
+
+
 @app.put("/api/meta-table-config", response_model=MetaTableConfigOut)
 def update_meta_table_config(payload: MetaTableConfigIn, session: Session = Depends(get_session), _: User = Depends(require("sources:write"))):
     identifier = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]*$")
@@ -218,6 +233,11 @@ def update_meta_table_config(payload: MetaTableConfigIn, session: Session = Depe
     config.tables_table_name = payload.tables_table_name
     config.columns_table_name = payload.columns_table_name
     session.commit()
+    if config.source_type == "external":
+        source = session.get(DataSource, config.external_source_id) if config.external_source_id else None
+        if not source:
+            raise HTTPException(404, "설정된 외부 DB 접속정보를 찾을 수 없습니다.")
+        _check_external_meta_tables(source, config)
     session.refresh(config)
     return config
 
