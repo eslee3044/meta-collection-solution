@@ -11,7 +11,7 @@ import yaml
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from sqlalchemy import desc, func, inspect, or_, select, text
+from sqlalchemy import MetaData, Table, and_, desc, func, inspect, or_, select, text, update
 from sqlalchemy.orm import Session
 
 from .config import get_settings
@@ -21,7 +21,7 @@ from .excel_export import build_schema_workbook
 from .integration import ensure_integration_views, snapshot_diff, snapshot_summary
 from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaColumnExt, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
 from .capabilities import assert_supported_db_type
-from .collector import available_schema_names, test_source
+from .collector import available_schema_names, source_engine, test_source
 from .scheduler import execute_job, start_scheduler, stop_scheduler, sync_jobs
 from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut
 from .security import create_token, decode_token, decrypt_json, encrypt_json, hash_password, verify_password
@@ -546,11 +546,71 @@ def list_run_logs(run_id: int, session: Session = Depends(get_session), _: User 
     return session.scalars(select(RunLog).where(RunLog.run_id == run_id).order_by(RunLog.sequence, RunLog.created_at)).all()
 
 
+def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapshot, source: DataSource, config: MetaTableConfig) -> tuple[int, int]:
+    available = {table["name"]: (schema["name"], table) for schema in snapshot.payload.get("schemas", []) for table in schema.get("tables", [])}
+    selected = set(payload.table_names)
+    missing = sorted(selected - available.keys())
+    if missing:
+        raise HTTPException(400, f"수집 결과에 없는 테이블이 포함되어 있습니다: {', '.join(missing[:10])}")
+    metadata = MetaData()
+    try:
+        with source_engine(source) as external_engine, external_engine.begin() as connection:
+            tables = Table(config.tables_table_name, metadata, schema=config.schema_name, autoload_with=connection)
+            columns = Table(config.columns_table_name, metadata, schema=config.schema_name, autoload_with=connection)
+            table_columns = {column.name.lower(): column for column in tables.c}
+            column_columns = {column.name.lower(): column for column in columns.c}
+            table_keys = ["system_cd", "instance_name", "postfix", "owner", "table_name"]
+            column_keys = [*table_keys, "column_name"]
+            if any(key not in table_columns for key in table_keys) or any(key not in column_columns for key in column_keys):
+                raise HTTPException(400, "외부 메타 테이블에 필요한 키 컬럼이 없습니다.")
+            table_count = column_count = 0
+            source_database = snapshot.payload.get("database") or ""
+            for table_name in payload.table_names:
+                owner, table = available[table_name]
+                table_key = {"system_cd": payload.system_cd, "instance_name": snapshot.payload.get("source", ""), "postfix": payload.postfix, "owner": owner, "table_name": table_name}
+                values = {**table_key, "database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": f"{table_name}{payload.target_name_suffix}", "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "table_type": "TABLE", "partition_col_modifiable_yn": "Y"}
+                values = {name: value for name, value in values.items() if name in table_columns}
+                where = and_(*[table_columns[key] == table_key[key] for key in table_keys])
+                if connection.execute(select(tables).where(where)).first():
+                    connection.execute(update(tables).where(where).values({table_columns[name]: value for name, value in values.items()}))
+                else:
+                    connection.execute(tables.insert().values({table_columns[name]: value for name, value in values.items()}))
+                table_count += 1
+                pk_names = set((table.get("primary_key") or {}).get("constrained_columns") or [])
+                for position, column in enumerate(table.get("columns", []), start=1):
+                    column_name = str(column.get("name", ""))
+                    if not column_name or (payload.columns_by_table is not None and column_name not in set(payload.columns_by_table.get(table_name, []))):
+                        continue
+                    column_key = {**table_key, "column_name": column_name}
+                    column_values = {**column_key, "column_id": int(column.get("ordinal_position") or position), "data_type": str(column.get("type") or ""), "data_length": int(column["length"]) if str(column.get("length", "")).isdigit() else None, "data_precision": int(column["precision"]) if str(column.get("precision", "")).isdigit() else None, "data_scale": int(column["scale"]) if str(column.get("scale", "")).isdigit() else None, "null_yn": "N" if column.get("nullable") is False else "Y", "pk_yn": "Y" if column_name in pk_names else "N", "comments": column.get("comment")}
+                    column_values = {name: value for name, value in column_values.items() if name in column_columns}
+                    column_where = and_(*[column_columns[key] == column_key[key] for key in column_keys])
+                    if connection.execute(select(columns).where(column_where)).first():
+                        connection.execute(update(columns).where(column_where).values({column_columns[name]: value for name, value in column_values.items()}))
+                    else:
+                        connection.execute(columns.insert().values({column_columns[name]: value for name, value in column_values.items()}))
+                    column_count += 1
+            return table_count, column_count
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(502, f"외부 DB 메타 테이블 등록에 실패했습니다: {error}") from error
+
+
 @app.post("/api/metadata/register")
 def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_session), _: User = Depends(require("metadata:write"))):
     snapshot = session.get(SchemaSnapshot, payload.snapshot_id)
     if not snapshot:
         raise HTTPException(404, "선택한 수집 스냅샷을 찾을 수 없습니다.")
+    config = session.get(MetaTableConfig, 1)
+    if config and config.source_type == "external":
+        if config.external_source_id is None:
+            raise HTTPException(400, "외부 DB 메타 등록 설정에 접속정보가 없습니다.")
+        source = session.get(DataSource, config.external_source_id)
+        if not source:
+            raise HTTPException(404, "설정된 외부 DB 접속정보를 찾을 수 없습니다.")
+        table_count, column_count = _register_metadata_external(payload, snapshot, source, config)
+        return {"tables": table_count, "columns": column_count, "schema": config.schema_name, "status": "registered", "target": "external"}
     selected = set(payload.table_names)
     available = {table["name"]: (schema["name"], table) for schema in snapshot.payload.get("schemas", []) for table in schema.get("tables", [])}
     missing = sorted(selected - available.keys())
