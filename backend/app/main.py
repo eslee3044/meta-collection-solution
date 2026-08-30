@@ -739,6 +739,42 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
     return {"tables": table_count, "columns": column_count, "schema": "configured", "status": "registered"}
 
 
+def _registered_metadata_external(session: Session, config: MetaTableConfig, page: int, page_size: int, search: str, instance_name: str | None):
+    source = session.get(DataSource, config.external_source_id) if config.external_source_id else None
+    if not source:
+        raise HTTPException(404, "설정된 외부 DB 접속정보를 찾을 수 없습니다.")
+    metadata = MetaData()
+    try:
+        with source_engine(source) as external_engine, external_engine.connect() as connection:
+            tables = Table(config.tables_table_name, metadata, schema=config.schema_name, autoload_with=connection)
+            columns = Table(config.columns_table_name, metadata, schema=config.schema_name, autoload_with=connection)
+            rows = [dict(row) for row in connection.execute(select(tables)).mappings().all()]
+            if instance_name:
+                rows = [row for row in rows if row.get("instance_name") == instance_name]
+            if search:
+                needle = search.lower()
+                matching_columns = {row.get("table_name") for row in connection.execute(select(columns)).mappings().all() if needle in str(row.get("column_name") or "").lower()}
+                rows = [row for row in rows if needle in " ".join(str(row.get(key) or "") for key in ("instance_name", "owner", "table_name")).lower() or row.get("table_name") in matching_columns]
+            rows.sort(key=lambda row: (str(row.get("instance_name") or ""), str(row.get("owner") or ""), str(row.get("table_name") or "")))
+            total = len(rows)
+            page_rows = rows[(page - 1) * page_size:page * page_size]
+            items = []
+            for row in page_rows:
+                key = {name: row.get(name) for name in ("system_cd", "instance_name", "postfix", "owner", "table_name")}
+                column_rows = connection.execute(select(columns).where(and_(*[columns.c[name] == value for name, value in key.items()]))).mappings().all()
+                items.append({**row, "comments": row.get("comments"), "columns": [dict(column) for column in column_rows]})
+            source_counts = {}
+            for row in rows:
+                source_counts[row.get("instance_name")] = source_counts.get(row.get("instance_name"), 0) + 1
+            return {"items": items, "total": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size, "sources": sorted(source_counts), "source_counts": source_counts}
+    except NoSuchTableError as error:
+        raise HTTPException(409, "외부 메타 테이블이 없어 등록 메타를 조회할 수 없습니다.") from error
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(502, f"외부 DB 등록 메타 조회에 실패했습니다: {error}") from error
+
+
 @app.get("/api/metadata/registered")
 def registered_metadata(
     page: int = Query(1, ge=1),
@@ -748,6 +784,9 @@ def registered_metadata(
     session: Session = Depends(get_session),
     _: User = Depends(require("metadata:read")),
 ):
+    config = session.get(MetaTableConfig, 1)
+    if config and config.source_type == "external":
+        return _registered_metadata_external(session, config, page, page_size, q.strip(), instance_name)
     query = select(MetaTableExt)
     search = q.strip()
     if instance_name:
