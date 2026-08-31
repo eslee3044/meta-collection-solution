@@ -587,30 +587,81 @@ def list_run_logs(run_id: int, session: Session = Depends(get_session), _: User 
 def _meta_table_script(config: MetaTableConfig, db_type: str) -> str:
     if db_type in {"mysql", "mariadb"}:
         quote_ident = lambda value: f"`{value.replace('`', '``')}`"
-        varchar = "VARCHAR(255)"
-        integer = "INT"
+        varchar = lambda size: f"VARCHAR({size})"
+        index_tail = ""
     elif db_type == "mssql":
         quote_ident = lambda value: f"[{value.replace(']', ']]')}]"
-        varchar = "VARCHAR(255)"
-        integer = "INT"
+        varchar = lambda size: f"VARCHAR({size})"
+        index_tail = ""
     else:
         quote_ident = lambda value: f'"{value.replace(chr(34), chr(34) * 2)}"'
-        varchar = "VARCHAR(255)"
-        integer = "INTEGER"
+        varchar = lambda size: f"varchar({size})"
+        index_tail = " USING btree"
     schema = quote_ident(config.schema_name)
     table = quote_ident(config.tables_table_name)
     column = quote_ident(config.columns_table_name)
-    table_key = ("," + chr(10) + "        ").join(f"{quote_ident(name)} {varchar} NOT NULL" for name in ["system_cd", "instance_name", "postfix", "owner", "table_name"])
-    column_key = ("," + chr(10) + "        ").join(f"{quote_ident(name)} {varchar} NOT NULL" for name in ["system_cd", "instance_name", "postfix", "owner", "table_name", "column_name"])
-    table_extra = [("database_name", varchar), ("etl_conn_div_cd", varchar), ("etl_conn_nm", varchar), ("tgt_ds_cd", varchar), ("tgt_table_name", varchar), ("tgt_database_name", varchar), ("instance_div_cd", varchar), ("comments", "TEXT"), ("table_type", varchar), ("partition_col_modifiable_yn", "CHAR(1)")]
-    column_extra = [("column_id", integer), ("data_type", varchar), ("data_length", integer), ("data_precision", integer), ("data_scale", integer), ("null_yn", "CHAR(1)"), ("pk_yn", "CHAR(1)"), ("comments", "TEXT")]
-    lines = [f"CREATE SCHEMA IF NOT EXISTS {schema};", "", f"CREATE TABLE {schema}.{table} (", f"        {table_key},"]
-    lines.extend(f"        {quote_ident(name)} {kind}," for name, kind in table_extra)
-    lines[-1] = lines[-1].rstrip(",") + ","
-    lines.extend([f"        CONSTRAINT {quote_ident(config.tables_table_name + '_PK')} PRIMARY KEY ({', '.join(quote_ident(name) for name in ['system_cd', 'instance_name', 'postfix', 'owner', 'table_name'])})", ");", "", f"CREATE TABLE {schema}.{column} (", f"        {column_key},"])
-    lines.extend(f"        {quote_ident(name)} {kind}," for name, kind in column_extra)
-    lines[-1] = lines[-1].rstrip(",") + ","
-    lines.extend([f"        CONSTRAINT {quote_ident(config.columns_table_name + '_PK')} PRIMARY KEY ({', '.join(quote_ident(name) for name in ['system_cd', 'instance_name', 'postfix', 'owner', 'table_name', 'column_name'])})", ");", ""])
+    table_name = f"{schema}.{table}"
+    column_name = f"{schema}.{column}"
+    q = quote_ident
+    lines = [
+        f"CREATE SCHEMA IF NOT EXISTS {schema};", "",
+        f"CREATE TABLE {table_name} (",
+        f"        {q('system_cd')} {varchar(100)} NOT NULL,",
+        f"        {q('instance_name')} {varchar(100)} NOT NULL,",
+        f"        {q('postfix')} {varchar(100)} NULL,",
+        f"        {q('owner')} {varchar(100)} NOT NULL,",
+        f"        {q('table_name')} {varchar(256)} NOT NULL,",
+        f"        {q('database_name')} {varchar(50)} NOT NULL,",
+        f"        {q('etl_conn_div_cd')} {varchar(50)} NULL,",
+        f"        {q('etl_conn_nm')} {varchar(50)} NULL,",
+        f"        {q('tgt_ds_cd')} {varchar(100)} NULL,",
+        f"        {q('tgt_table_name')} {varchar(300)} NOT NULL,",
+        f"        {q('tgt_database_name')} {varchar(50)} NOT NULL,",
+        f"        {q('instance_div_cd')} {varchar(100)} NULL,",
+        f"        {q('comments')} {varchar(4000)} NULL,",
+        f"        {q('createdon')} timestamp NULL,",
+        f"        {q('createdby')} {varchar(50)} NULL,",
+        f"        {q('lastupdated')} timestamp NULL,",
+        f"        {q('updatedby')} {varchar(50)} NULL,",
+        f"        {q('sess_name_rule')} {varchar(300)} NULL,",
+        f"        {q('mapp_name_rule')} {varchar(300)} NULL,",
+        f"        {q('tgt_name_rule')} {varchar(300)} NULL,",
+        f"        {q('partition_col_modifiable_yn')} {varchar(1)} NULL,",
+        f"        {q('table_type')} {varchar(50)} NULL,",
+        f"        {q('sql_insp_yn')} {varchar(1)} NULL,",
+        f"        {q('sql_src_tcount')} {varchar(4000)} NULL,",
+        f"        {q('sql_tgt_tcount')} {varchar(4000)} NULL,",
+        f"        {q('sql_tgt_pk_dup')} {varchar(4000)} NULL",
+        ");",
+        f"CREATE INDEX {q(config.tables_table_name + '_system_cd_idx')} ON {table_name}{index_tail} ({q('system_cd')}, {q('instance_name')}, {q('owner')}, {q('table_name')});",
+        "",
+        f"CREATE TABLE {column_name} (",
+        f"        {q('system_cd')} {varchar(100)} NULL,",
+        f"        {q('instance_name')} {varchar(100)} NULL,",
+        f"        {q('postfix')} {varchar(100)} NULL,",
+        f"        {q('owner')} {varchar(100)} NULL,",
+        f"        {q('table_name')} {varchar(256)} NULL,",
+        f"        {q('column_name')} {varchar(256)} NULL,",
+        f"        {q('column_id')} INTEGER NULL,",
+        f"        {q('data_type')} {varchar(50)} NULL,",
+        f"        {q('data_length')} INTEGER NULL,",
+        f"        {q('data_precision')} INTEGER NULL,",
+        f"        {q('data_scale')} INTEGER NULL,",
+        f"        {q('null_yn')} {varchar(1)} NULL,",
+        f"        {q('pk_yn')} {varchar(1)} NULL,",
+        f"        {q('partition_key_yn')} {varchar(1)} NULL,",
+        f"        {q('cluster_key_yn')} {varchar(1)} NULL,",
+        f"        {q('update_base_yn')} {varchar(1)} NULL,",
+        f"        {q('to_single_byte_yn')} {varchar(1)} NULL,",
+        f"        {q('substr_yn')} {varchar(1)} NULL,",
+        f"        {q('comments')} {varchar(4000)} NULL,",
+        f"        {q('createdon')} timestamp NULL,",
+        f"        {q('createdby')} {varchar(50)} NULL,",
+        f"        {q('lastupdated')} timestamp NULL,",
+        f"        {q('updatedby')} {varchar(50)} NULL",
+        ");",
+        f"CREATE INDEX {q(config.columns_table_name + '_system_cd_idx')} ON {column_name}{index_tail} ({q('system_cd')}, {q('instance_name')}, {q('owner')}, {q('table_name')});",
+    ]
     return chr(10).join(lines)
 
 
