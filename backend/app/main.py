@@ -681,7 +681,7 @@ def metadata_register_script(session: Session = Depends(get_session), _: User = 
 def _date_flag_candidates(columns: list[dict]) -> dict[str, dict[str, str]]:
     date_types = ("date", "datetime", "timestamp", "time")
     date_words = re.compile(r"(?:date|day|dt|ymd|yyyymmdd|created|updated|modified|changed|time)", re.I)
-    partition_words = re.compile(r"(?:partition|part|date|day|dt|ymd|created|create)", re.I)
+    partition_words = re.compile(r"(?:partition|part|event|created|create)", re.I)
     update_words = re.compile(r"(?:update|updated|modified|modify|changed|change|last)", re.I)
     scored: dict[str, dict[str, tuple[int, str]]] = {"partition_key_yn": {}, "update_base_yn": {}}
     for column in columns:
