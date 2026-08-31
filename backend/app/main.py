@@ -877,7 +877,7 @@ def update_registered_metadata(payload: dict, session: Session = Depends(get_ses
     table = session.get(MetaTableExt, key)
     if not table:
         raise HTTPException(404, "등록된 메타 테이블을 찾을 수 없습니다.")
-    for field in ("database_name", "etl_conn_div_cd", "etl_conn_nm", "tgt_ds_cd", "tgt_table_name", "tgt_database_name", "comments"):
+    for field in ("database_name", "etl_conn_div_cd", "etl_conn_nm", "tgt_ds_cd", "tgt_table_name", "tgt_database_name", "comments", "partition_key_yn", "cluster_key_yn", "update_base_yn", "to_single_byte_yn", "substr_yn"):
         if field in payload:
             setattr(table, field, payload[field])
     items = payload.get("columns", [])
