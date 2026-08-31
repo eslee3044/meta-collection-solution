@@ -11,7 +11,7 @@ import yaml
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from sqlalchemy import MetaData, Table, and_, desc, func, inspect, or_, select, text, update
+from sqlalchemy import MetaData, Table, and_, delete, desc, func, inspect, or_, select, text, update
 from sqlalchemy.exc import NoSuchTableError
 from sqlalchemy.orm import Session
 
@@ -899,6 +899,48 @@ def registered_metadata(
     items = [{"system_cd": table.system_cd, "instance_name": table.instance_name, "postfix": table.postfix, "owner": table.owner, "table_name": table.table_name, "database_name": table.database_name, "etl_conn_div_cd": table.etl_conn_div_cd, "etl_conn_nm": table.etl_conn_nm, "tgt_ds_cd": table.tgt_ds_cd, "tgt_table_name": table.tgt_table_name, "tgt_database_name": table.tgt_database_name, "comments": table.comments, "columns": grouped.get((table.system_cd, table.instance_name, table.postfix, table.owner, table.table_name), [])} for table in tables]
     sources = sorted({source for source in session.scalars(select(MetaTableExt.instance_name).distinct()).all() if source})
     return {"items": items, "total": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size, "sources": sources, "source_counts": source_counts}
+
+
+@app.delete("/api/metadata/registered")
+def delete_registered_metadata(payload: dict, session: Session = Depends(get_session), _: User = Depends(require("metadata:write"))):
+    key_names = ("system_cd", "instance_name", "postfix", "owner", "table_name")
+    key = {name: payload.get(name) for name in key_names}
+    if not all(isinstance(value, str) and value for value in key.values()):
+        raise HTTPException(422, "삭제할 메타 테이블의 키 값은 모두 필수입니다.")
+    config = session.get(MetaTableConfig, 1)
+    if config and config.source_type == "external":
+        source = session.get(DataSource, config.external_source_id) if config.external_source_id else None
+        if not source:
+            raise HTTPException(404, "설정된 외부 DB 접속정보를 찾을 수 없습니다.")
+        metadata = MetaData()
+        try:
+            with source_engine(source) as external_engine, external_engine.begin() as connection:
+                tables = Table(config.tables_table_name, metadata, schema=config.schema_name, autoload_with=connection)
+                columns = Table(config.columns_table_name, metadata, schema=config.schema_name, autoload_with=connection)
+                table_columns = {column.name.lower(): column for column in tables.c}
+                column_columns = {column.name.lower(): column for column in columns.c}
+                table_where = and_(*[table_columns[name] == value for name, value in key.items()])
+                column_where = and_(*[column_columns[name] == value for name, value in key.items()])
+                table_result = connection.execute(delete(tables).where(table_where))
+                connection.execute(delete(columns).where(column_where))
+                if not table_result.rowcount:
+                    raise HTTPException(404, "등록된 메타 테이블을 찾을 수 없습니다.")
+        except HTTPException:
+            raise
+        except NoSuchTableError as error:
+            raise HTTPException(409, "외부 메타 테이블이 없어 삭제할 수 없습니다.") from error
+        except Exception as error:
+            raise HTTPException(502, f"외부 DB 메타 테이블 삭제에 실패했습니다: {error}") from error
+        return {"status": "deleted", "table_name": key["table_name"]}
+    table_where = and_(*[getattr(MetaTableExt, name) == value for name, value in key.items()])
+    column_where = and_(*[getattr(MetaColumnExt, name) == value for name, value in key.items()])
+    table_result = session.execute(delete(MetaTableExt).where(table_where))
+    session.execute(delete(MetaColumnExt).where(column_where))
+    if not table_result.rowcount:
+        session.rollback()
+        raise HTTPException(404, "등록된 메타 테이블을 찾을 수 없습니다.")
+    session.commit()
+    return {"status": "deleted", "table_name": key["table_name"]}
 
 
 @app.put("/api/metadata/registered")
