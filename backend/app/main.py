@@ -678,6 +678,32 @@ def metadata_register_script(session: Session = Depends(get_session), _: User = 
     return Response(content=content, media_type="text/sql; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
+def _date_flag_candidates(columns: list[dict]) -> dict[str, dict[str, str]]:
+    date_types = ("date", "datetime", "timestamp", "time")
+    date_words = re.compile(r"(?:date|day|dt|ymd|yyyymmdd|created|updated|modified|changed|time)", re.I)
+    partition_words = re.compile(r"(?:partition|part|date|day|dt|ymd|created|create)", re.I)
+    update_words = re.compile(r"(?:update|updated|modified|modify|changed|change|last)", re.I)
+    scored: dict[str, dict[str, tuple[int, str]]] = {"partition_key_yn": {}, "update_base_yn": {}}
+    for column in columns:
+        name = str(column.get("name") or "")
+        data_type = str(column.get("type") or "").lower()
+        if not name:
+            continue
+        typed_date = any(kind in data_type for kind in date_types)
+        string_date = any(kind in data_type for kind in ("char", "text", "string", "varchar")) and bool(date_words.search(name))
+        if not (typed_date or string_date):
+            continue
+        base = 100 if typed_date else 50
+        for flag, words in (("partition_key_yn", partition_words), ("update_base_yn", update_words)):
+            score = base + (40 if words.search(name) else 0) + (10 if date_words.search(name) else 0)
+            scored[flag][name] = (score, name.lower())
+    result: dict[str, dict[str, str]] = {}
+    for flag, values in scored.items():
+        winner = max(values, key=lambda name: values[name]) if values else None
+        result[flag] = {name: ("Y" if name == winner else "N") for name in values}
+    return result
+
+
 def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapshot, source: DataSource, config: MetaTableConfig) -> tuple[int, int]:
     available = {table["name"]: (schema["name"], table) for schema in snapshot.payload.get("schemas", []) for table in schema.get("tables", [])}
     selected = set(payload.table_names)
@@ -715,12 +741,14 @@ def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapsho
                     connection.execute(tables.insert().values({table_columns[name]: value for name, value in values.items()}))
                 table_count += 1
                 pk_names = set((table.get("primary_key") or {}).get("constrained_columns") or [])
+                selected_column_names = set(payload.columns_by_table.get(table_name, [])) if payload.columns_by_table is not None else {str(column.get("name", "")) for column in table.get("columns", [])}
+                flag_candidates = _date_flag_candidates([column for column in table.get("columns", []) if str(column.get("name", "")) in selected_column_names])
                 for position, column in enumerate(table.get("columns", []), start=1):
                     column_name = str(column.get("name", ""))
                     if not column_name or (payload.columns_by_table is not None and column_name not in set(payload.columns_by_table.get(table_name, []))):
                         continue
                     column_key = {**table_key, "column_name": column_name}
-                    column_values = {**column_key, "column_id": int(column.get("ordinal_position") or position), "data_type": str(column.get("type") or ""), "data_length": int(column["length"]) if str(column.get("length", "")).isdigit() else None, "data_precision": int(column["precision"]) if str(column.get("precision", "")).isdigit() else None, "data_scale": int(column["scale"]) if str(column.get("scale", "")).isdigit() else None, "null_yn": "N" if column.get("nullable") is False else "Y", "pk_yn": "Y" if column_name in pk_names else "N", "comments": column.get("comment")}
+                    column_values = {**column_key, "column_id": int(column.get("ordinal_position") or position), "data_type": str(column.get("type") or ""), "data_length": int(column["length"]) if str(column.get("length", "")).isdigit() else None, "data_precision": int(column["precision"]) if str(column.get("precision", "")).isdigit() else None, "data_scale": int(column["scale"]) if str(column.get("scale", "")).isdigit() else None, "null_yn": "N" if column.get("nullable") is False else "Y", "pk_yn": "Y" if column_name in pk_names else "N", "partition_key_yn": flag_candidates["partition_key_yn"].get(column_name, "N"), "update_base_yn": flag_candidates["update_base_yn"].get(column_name, "N"), "comments": column.get("comment")}
                     column_values = {name: value for name, value in column_values.items() if name in column_columns}
                     column_where = and_(*[column_columns[key] == column_key[key] for key in column_keys])
                     if connection.execute(select(columns).where(column_where)).first():
@@ -768,6 +796,8 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
             setattr(target, key, value)
         table_count += 1
         pk_names = set((table.get("primary_key") or {}).get("constrained_columns") or [])
+        selected_column_names = set(payload.columns_by_table.get(table_name, [])) if payload.columns_by_table is not None else {str(column.get("name", "")) for column in table.get("columns", [])}
+        flag_candidates = _date_flag_candidates([column for column in table.get("columns", []) if str(column.get("name", "")) in selected_column_names])
         for position, column in enumerate(table.get("columns", []), start=1):
             column_name = str(column.get("name", ""))
             if not column_name or (payload.columns_by_table is not None and column_name not in set(payload.columns_by_table.get(table_name, []))):
@@ -784,6 +814,8 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
             target_column.data_scale = int(column["scale"]) if str(column.get("scale", "")).isdigit() else None
             target_column.null_yn = "N" if column.get("nullable") is False else "Y"
             target_column.pk_yn = "Y" if column_name in pk_names else "N"
+            target_column.partition_key_yn = flag_candidates["partition_key_yn"].get(column_name, "N")
+            target_column.update_base_yn = flag_candidates["update_base_yn"].get(column_name, "N")
             target_column.comments = column.get("comment")
             column_count += 1
     session.commit()
@@ -863,7 +895,7 @@ def registered_metadata(
     grouped: dict[tuple, list] = {}
     for column in columns:
         key = (column.system_cd, column.instance_name, column.postfix, column.owner, column.table_name)
-        grouped.setdefault(key, []).append({"column_name": column.column_name, "column_id": column.column_id, "data_type": column.data_type, "data_length": column.data_length, "data_precision": column.data_precision, "data_scale": column.data_scale, "null_yn": column.null_yn, "pk_yn": column.pk_yn, "comments": column.comments})
+        grouped.setdefault(key, []).append({"column_name": column.column_name, "column_id": column.column_id, "data_type": column.data_type, "data_length": column.data_length, "data_precision": column.data_precision, "data_scale": column.data_scale, "null_yn": column.null_yn, "pk_yn": column.pk_yn, "partition_key_yn": column.partition_key_yn, "update_base_yn": column.update_base_yn, "comments": column.comments})
     items = [{"system_cd": table.system_cd, "instance_name": table.instance_name, "postfix": table.postfix, "owner": table.owner, "table_name": table.table_name, "database_name": table.database_name, "etl_conn_div_cd": table.etl_conn_div_cd, "etl_conn_nm": table.etl_conn_nm, "tgt_ds_cd": table.tgt_ds_cd, "tgt_table_name": table.tgt_table_name, "tgt_database_name": table.tgt_database_name, "comments": table.comments, "columns": grouped.get((table.system_cd, table.instance_name, table.postfix, table.owner, table.table_name), [])} for table in tables]
     sources = sorted({source for source in session.scalars(select(MetaTableExt.instance_name).distinct()).all() if source})
     return {"items": items, "total": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size, "sources": sources, "source_counts": source_counts}
