@@ -158,11 +158,11 @@ class MetaTableConfigOut(MetaTableConfigIn):
 class MetaRegisterIn(BaseModel):
     snapshot_id: int
     table_names: list[str] = Field(min_length=1)
-    system_cd: str = Field(pattern=r"^[A-Z]{4}$")
+    system_cd: str = Field(pattern=r"^[A-Z0-9]{4}$")
     postfix: str = Field(min_length=1, max_length=32)
     etl_conn_div_cd: Literal["Oracle", "ODBC"]
     etl_conn_nm: str = Field(min_length=1, max_length=255)
-    tgt_ds_cd: str = Field(pattern=r"^ST_[A-Z]{4}$")
+    tgt_ds_cd: str = Field(pattern=r"^ST_[A-Z0-9]{4}$")
     tgt_database_name: str = Field(default="BigQuery", min_length=1, max_length=255)
     instance_div_cd: str = Field(default="", max_length=32)
     target_name_suffix: str = Field(default="", max_length=32)
