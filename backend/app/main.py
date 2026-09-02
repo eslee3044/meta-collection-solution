@@ -680,10 +680,10 @@ def metadata_register_script(session: Session = Depends(get_session), _: User = 
 
 def _date_flag_candidates(columns: list[dict]) -> dict[str, dict[str, str]]:
     date_types = ("date", "datetime", "timestamp", "time")
-    date_words = re.compile(r"(?:date|day|dt|ymd|yyyymmdd|created|updated|modified|changed|time)", re.I)
-    partition_words = re.compile(r"(?:partition|part|event|created|create)", re.I)
-    update_words = re.compile(r"(?:update|updated|modified|modify|changed|change|last)", re.I)
-    scored: dict[str, dict[str, tuple[int, str]]] = {"partition_key_yn": {}, "update_base_yn": {}}
+    date_words = re.compile(r"(?:date|day|dt|ymd|yyyymmdd|time)", re.I)
+    created_words = re.compile(r"(?:created|create|creation|regist|registered|insert|입력|등록|생성)", re.I)
+    changed_words = re.compile(r"(?:update|updated|modified|modify|changed|change|last|변경|수정)", re.I)
+    candidates: list[tuple[str, int, str, bool, bool]] = []
     for column in columns:
         name = str(column.get("name") or "")
         data_type = str(column.get("type") or "").lower()
@@ -693,14 +693,17 @@ def _date_flag_candidates(columns: list[dict]) -> dict[str, dict[str, str]]:
         string_date = any(kind in data_type for kind in ("char", "text", "string", "varchar")) and bool(date_words.search(name))
         if not (typed_date or string_date):
             continue
-        base = 100 if typed_date else 50
-        for flag, words in (("partition_key_yn", partition_words), ("update_base_yn", update_words)):
-            score = base + (40 if words.search(name) else 0) + (10 if date_words.search(name) else 0)
-            scored[flag][name] = (score, name.lower())
-    result: dict[str, dict[str, str]] = {}
-    for flag, values in scored.items():
-        winner = max(values, key=lambda name: values[name]) if values else None
-        result[flag] = {name: ("Y" if name == winner else "N") for name in values}
+        score = (100 if typed_date else 50) + (10 if date_words.search(name) else 0)
+        candidates.append((name, score, name.lower(), bool(created_words.search(name)), bool(changed_words.search(name))))
+    created = [candidate for candidate in candidates if candidate[3]]
+    changed = [candidate for candidate in candidates if candidate[4]]
+    result = {"partition_key_yn": {}, "update_base_yn": {}}
+    if created:
+        partition_winner = max(created, key=lambda candidate: (candidate[1], candidate[2]))[0]
+        result["partition_key_yn"] = {candidate[0]: ("Y" if candidate[0] == partition_winner else "N") for candidate in created}
+    update_candidates = changed or created
+    result["update_base_yn"] = {candidate[0]: "Y" for candidate in update_candidates}
+    result["update_base_yn"].update({candidate[0]: "N" for candidate in candidates if candidate[0] not in result["update_base_yn"]})
     return result
 
 
