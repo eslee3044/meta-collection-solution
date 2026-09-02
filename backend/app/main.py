@@ -697,13 +697,13 @@ def _date_flag_candidates(columns: list[dict]) -> dict[str, dict[str, str]]:
         candidates.append((name, score, name.lower(), bool(created_words.search(name)), bool(changed_words.search(name))))
     created = [candidate for candidate in candidates if candidate[3]]
     changed = [candidate for candidate in candidates if candidate[4]]
-    result = {"partition_key_yn": {}, "update_base_yn": {}}
+    result = {"partition_key_yn": {candidate[0]: "N" for candidate in candidates}, "update_base_yn": {candidate[0]: "N" for candidate in candidates}}
     if created:
         partition_winner = max(created, key=lambda candidate: (candidate[1], candidate[2]))[0]
-        result["partition_key_yn"] = {candidate[0]: ("Y" if candidate[0] == partition_winner else "N") for candidate in created}
-    update_candidates = changed or created
-    result["update_base_yn"] = {candidate[0]: "Y" for candidate in update_candidates}
-    result["update_base_yn"].update({candidate[0]: "N" for candidate in candidates if candidate[0] not in result["update_base_yn"]})
+        result["partition_key_yn"][partition_winner] = "Y"
+    update_winner = max(changed or created, key=lambda candidate: (candidate[1], candidate[2]))[0] if (changed or created) else None
+    if update_winner:
+        result["update_base_yn"][update_winner] = "Y"
     return result
 
 
