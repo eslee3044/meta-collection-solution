@@ -1,3 +1,4 @@
+import os
 import xml.etree.ElementTree as ET
 import argparse
 import pymysql
@@ -180,7 +181,7 @@ def genExtensionStr(dsNm, tabNm, tgtFields):
 	# 							BigQueryConnectInfo
 	###############################################################################
 	extStr = extStr + f"""<connection:BigQueryConnectInfo imx:id="U:{connectInfo_id}" connectionType="com.infa.adapter.bigquery.connection.BigQueryConnectInfo">
-<sdkConnectInfoModelExtension imx:id="ID_999" xsi:type="connection:BigQueryConnectInfoExtension" clientEmail="svcac-edl-prd-etl%40pj-lge-edl.iam.gserviceaccount.com" privateKey="" projectId="pj-lge-edl"/>
+<sdkConnectInfoModelExtension imx:id="ID_999" xsi:type="connection:BigQueryConnectInfoExtension" clientEmail="{os.getenv('BQ_CLIENT_EMAIL', '')}" privateKey="" projectId="{os.getenv('BQ_PROJECT_ID', '')}"/>
 </connection:BigQueryConnectInfo>
 </imx:IMX>"""
 

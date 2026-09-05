@@ -1,3 +1,4 @@
+import os
 import argparse
 from google.cloud import bigquery
 import psycopg2
@@ -213,7 +214,7 @@ for r, row in enumerate(rsltCol):
 
 print(schema)
 
-table_id = f'pj-lge-edl.{dsnmOk}.{tgt_tbnm}'
+table_id = f'{os.environ.get("BQ_PROJECT_ID", "")}.{dsnmOk}.{tgt_tbnm}'
 table = bigquery.Table(table_id, schema=schema)
 
 # partition	- ST일 경우에는 DAY partition을 만든다

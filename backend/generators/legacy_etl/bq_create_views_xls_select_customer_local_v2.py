@@ -451,7 +451,7 @@ def main():
 
     sys.stdout = Logger()
 
-    project_id = 'pj-lge-edl'
+    project_id = os.environ.get('BQ_PROJECT_ID', '')
     mysql_conn_str = "mysql+pymysql://.....".format()
 
     # WHERE 조건 추가 (김현진C, 20/12/29)
