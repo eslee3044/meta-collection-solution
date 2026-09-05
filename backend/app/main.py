@@ -681,8 +681,8 @@ def metadata_register_script(session: Session = Depends(get_session), _: User = 
 def _date_flag_candidates(columns: list[dict]) -> dict[str, dict[str, str]]:
     date_types = ("date", "datetime", "timestamp", "time")
     date_words = re.compile(r"(?:date|day|dt|ymd|yyyymmdd|time)", re.I)
-    created_words = re.compile(r"(?:created|create|creation|regist|registered|insert|입력|등록|생성)", re.I)
-    changed_words = re.compile(r"(?:update|updated|modified|modify|changed|change|last|변경|수정)", re.I)
+    created_words = re.compile(r"(?:crt|created|create|creation|regist|registered|insert|입력|등록|생성)", re.I)
+    changed_words = re.compile(r"(?:updt|update|updated|modified|modify|changed|change|last|변경|수정)", re.I)
     candidates: list[tuple[str, int, str, bool, bool]] = []
     for column in columns:
         name = str(column.get("name") or "")
