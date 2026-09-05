@@ -2,6 +2,8 @@
 
 기존 VBA에서 호출하던 ETL 산출물 생성 Python 원본 모음입니다.
 
+- `pyUtil_v3.6.sanitized.xlsm`: 기존 VBA 도구의 안전한 보관 사본. 매크로는 유지하되 접속 비밀번호와 로컬 경로는 제거했다.
+
 ## 포함된 생성기
 
 - BigQuery 테이블·뷰 생성
