@@ -707,6 +707,26 @@ def _date_flag_candidates(columns: list[dict]) -> dict[str, dict[str, str]]:
     return result
 
 
+def _informatica_name_rules(system_cd: str, instance_div_cd: str) -> dict[str, str]:
+    if instance_div_cd.strip().upper() == "GMESHQP":
+        return {
+            "sess_name_rule": "s_m_%SYSTEM_CD%_%INSTANCE_NAME%_%TABLE_NAME%_GV",
+            "mapp_name_rule": "m_%SYSTEM_CD%_%TABLE_NAME%_GV",
+            "tgt_name_rule": "%SYSTEM_CD%_%TABLE_NAME%_GV",
+        }
+    if system_cd.strip().upper() in {"GMES", "GSFS", "NBES", "GFMS"}:
+        return {
+            "sess_name_rule": "s_m_%SYSTEM_CD%_%INSTANCE_NAME%_%TABLE_NAME%",
+            "mapp_name_rule": "m_%SYSTEM_CD%_%TABLE_NAME%",
+            "tgt_name_rule": "%SYSTEM_CD%_%TABLE_NAME%",
+        }
+    return {
+        "sess_name_rule": "s_m_%SYSTEM_CD%_%TGT_TABLE_NAME%",
+        "mapp_name_rule": "m_%SYSTEM_CD%_%TGT_TABLE_NAME%",
+        "tgt_name_rule": "%SYSTEM_CD%_%TGT_TABLE_NAME%",
+    }
+
+
 def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapshot, source: DataSource, config: MetaTableConfig) -> tuple[int, int]:
     available = {table["name"]: (schema["name"], table) for schema in snapshot.payload.get("schemas", []) for table in schema.get("tables", [])}
     selected = set(payload.table_names)
@@ -735,7 +755,10 @@ def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapsho
             for table_name in payload.table_names:
                 owner, table = available[table_name]
                 table_key = {"system_cd": payload.system_cd, "instance_name": snapshot.payload.get("source", ""), "postfix": payload.postfix, "owner": owner, "table_name": table_name}
-                values = {**table_key, "database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": f"{table_name}{payload.target_name_suffix}", "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "table_type": "TABLE", "partition_col_modifiable_yn": "Y"}
+                target_name = f"{table_name}{payload.target_name_suffix}"
+                rules = _informatica_name_rules(payload.system_cd, payload.instance_div_cd)
+                table_comment = (payload.table_comments or {}).get(table_name, table.get("comment") or "")
+                values = {**table_key, "database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": "TABLE", "partition_col_modifiable_yn": "Y"}
                 values = {name: value for name, value in values.items() if name in table_columns}
                 where = and_(*[table_columns[key] == table_key[key] for key in table_keys])
                 if connection.execute(select(tables).where(where)).first():
@@ -790,12 +813,14 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
     for table_name in payload.table_names:
         schema_name, table = available[table_name]
         target_name = f"{table_name}{payload.target_name_suffix}"
+        rules = _informatica_name_rules(payload.system_cd, payload.instance_div_cd)
+        table_comment = (payload.table_comments or {}).get(table_name, table.get("comment") or "")
         table_key = {"system_cd": payload.system_cd, "instance_name": snapshot.payload.get("source", ""), "postfix": payload.postfix, "owner": schema_name, "table_name": table_name}
         target = session.get(MetaTableExt, tuple(table_key.values()))
         if not target:
             target = MetaTableExt(**table_key)
             session.add(target)
-        for key, value in {"database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "table_type": "TABLE", "partition_col_modifiable_yn": "Y"}.items():
+        for key, value in {"database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": "TABLE", "partition_col_modifiable_yn": "Y"}.items():
             setattr(target, key, value)
         table_count += 1
         pk_names = set((table.get("primary_key") or {}).get("constrained_columns") or [])
