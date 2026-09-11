@@ -47,6 +47,16 @@
 .column-selection-row b,.column-selection-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @media(max-width:760px){.modal-wide:has(.column-selection-modal){width:calc(100vw - 20px)}.column-selection-modal{width:100%;min-width:0}.column-selection-toolbar{align-items:stretch;flex-direction:column;gap:10px;flex-wrap:wrap}.column-selection-toolbar>b{margin-left:0}.column-selection-list{grid-template-columns:1fr;max-height:50vh}}
 
+/* Keep registration and column-selection content aligned with explicit horizontal padding. */
+.register-table-picker{width:100%;min-width:0;padding:20px 24px 0;box-sizing:border-box}
+.register-table-picker .picker-head{width:100%;min-width:0;padding:0 0 16px}
+.register-table-picker .picker-list{width:100%;min-width:0}
+.register-table-picker .picker-list>label{width:100%;min-width:0;padding:12px 0;border-bottom:1px solid #eef1f5}
+.column-selection-modal{width:auto;min-width:720px;max-width:100%;padding:20px 24px 0;box-sizing:border-box;overflow:visible}
+.column-selection-toolbar,.column-selection-list{width:100%;min-width:0}
+.column-selection-modal .modal-actions{margin-left:-24px;margin-right:-24px;padding-left:24px;padding-right:24px}
+@media(max-width:760px){.register-table-picker{padding-left:16px;padding-right:16px}.column-selection-modal{width:100%;min-width:0;padding-left:16px;padding-right:16px}.column-selection-modal .modal-actions{margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px}}
+
 /* Shared pagination and registered metadata layout */
 .pagination{display:flex;align-items:center;justify-content:flex-end;gap:8px;width:100%;padding:14px 20px 18px;color:var(--muted);font:500 12px/1 'DM Sans','Noto Sans KR',sans-serif}
 .pagination label{display:inline-flex;align-items:center;gap:7px;color:#66748a;font-size:12px;white-space:nowrap}
