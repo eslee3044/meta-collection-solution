@@ -995,6 +995,44 @@ def update_registered_metadata(payload: dict, session: Session = Depends(get_ses
     key = (payload.get("system_cd"), payload.get("instance_name"), payload.get("postfix"), payload.get("owner"), payload.get("table_name"))
     if not all(isinstance(value, str) and value for value in key):
         raise HTTPException(422, "등록 메타의 키 값은 모두 필수입니다.")
+    config = session.get(MetaTableConfig, 1)
+    if config and config.source_type == "external":
+        source = session.get(DataSource, config.external_source_id) if config.external_source_id else None
+        if not source:
+            raise HTTPException(404, "설정된 외부 DB 접속정보를 찾을 수 없습니다.")
+        metadata = MetaData()
+        try:
+            with source_engine(source) as external_engine, external_engine.begin() as connection:
+                tables = Table(config.tables_table_name, metadata, schema=config.schema_name, autoload_with=connection)
+                columns = Table(config.columns_table_name, metadata, schema=config.schema_name, autoload_with=connection)
+                table_columns = {column.name.lower(): column for column in tables.c}
+                column_columns = {column.name.lower(): column for column in columns.c}
+                table_where = and_(*[table_columns[name] == value for name, value in {"system_cd": key[0], "instance_name": key[1], "postfix": key[2], "owner": key[3], "table_name": key[4]}.items()])
+                if not connection.execute(select(tables).where(table_where)).first():
+                    raise HTTPException(404, "등록된 메타 테이블을 찾을 수 없습니다.")
+                table_fields = ("database_name", "etl_conn_div_cd", "etl_conn_nm", "tgt_ds_cd", "tgt_table_name", "tgt_database_name", "comments", "partition_key_yn", "cluster_key_yn", "update_base_yn", "to_single_byte_yn", "substr_yn")
+                table_values = {field: payload[field] for field in table_fields if field in payload and field in table_columns}
+                if table_values:
+                    connection.execute(update(tables).where(table_where).values({table_columns[field]: value for field, value in table_values.items()}))
+                valid_items = payload.get("columns", [])
+                column_names = [item.get("column_name") for item in valid_items if isinstance(item.get("column_name"), str) and item.get("column_name").strip()]
+                column_where = and_(*[column_columns[name] == value for name, value in {"system_cd": key[0], "instance_name": key[1], "postfix": key[2], "owner": key[3], "table_name": key[4]}.items()], column_columns["column_name"].in_(column_names))
+                existing_columns = {row._mapping[column_columns["column_name"]]: row for row in connection.execute(select(columns).where(column_where))}
+                column_fields = ("column_id", "data_type", "data_length", "data_precision", "data_scale", "null_yn", "pk_yn", "partition_key_yn", "cluster_key_yn", "update_base_yn", "to_single_byte_yn", "substr_yn", "comments")
+                for item in valid_items:
+                    column_name = item.get("column_name")
+                    if column_name not in existing_columns:
+                        continue
+                    values = {field: item[field] for field in column_fields if field in item and field in column_columns}
+                    if values:
+                        connection.execute(update(columns).where(and_(*[column_columns[name] == value for name, value in {"system_cd": key[0], "instance_name": key[1], "postfix": key[2], "owner": key[3], "table_name": key[4], "column_name": column_name}.items()])).values({column_columns[field]: value for field, value in values.items()}))
+                return {"status": "updated"}
+        except HTTPException:
+            raise
+        except NoSuchTableError as error:
+            raise HTTPException(409, "외부 메타 테이블이 없어 수정할 수 없습니다.") from error
+        except Exception as error:
+            raise HTTPException(502, f"외부 DB 메타 테이블 수정에 실패했습니다: {error}") from error
     table = session.get(MetaTableExt, key)
     if not table:
         raise HTTPException(404, "등록된 메타 테이블을 찾을 수 없습니다.")
@@ -1020,7 +1058,7 @@ def update_registered_metadata(payload: dict, session: Session = Depends(get_ses
         column = columns_by_name.get(item["column_name"])
         if not column:
             continue
-        for field in ("data_type", "null_yn", "pk_yn", "comments"):
+        for field in ("data_type", "null_yn", "pk_yn", "partition_key_yn", "cluster_key_yn", "update_base_yn", "to_single_byte_yn", "substr_yn", "comments"):
             if field in item:
                 setattr(column, field, item[field])
         for field in ("column_id", "data_length", "data_precision", "data_scale"):
