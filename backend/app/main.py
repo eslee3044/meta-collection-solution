@@ -678,6 +678,28 @@ def metadata_register_script(session: Session = Depends(get_session), _: User = 
     return Response(content=content, media_type="text/sql; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
+def _split_data_type(value: object, length: object = None, precision: object = None, scale: object = None) -> tuple[str, int | None, int | None, int | None]:
+    raw = str(value or "").strip()
+    match = re.match(r"^\s*([^()]+?)\s*(?:\(([^)]*)\))?\s*$", raw)
+    data_type = (match.group(1) if match else raw).strip()
+    parts = [part.strip() for part in ((match.group(2) if match else "") or "").split(",") if part.strip()]
+    def integer(item: object) -> int | None:
+        try:
+            return int(str(item).strip()) if item is not None and str(item).strip() != "" else None
+        except (TypeError, ValueError):
+            return None
+    data_length = integer(length)
+    data_precision = integer(precision)
+    data_scale = integer(scale)
+    if data_length is None and len(parts) == 1:
+        data_length = integer(parts[0])
+    if data_precision is None and len(parts) == 2:
+        data_precision = integer(parts[0])
+    if data_scale is None and len(parts) == 2:
+        data_scale = integer(parts[1])
+    return data_type, data_length, data_precision, data_scale
+
+
 def _date_flag_candidates(columns: list[dict]) -> dict[str, dict[str, str]]:
     date_types = ("date", "datetime", "timestamp", "time")
     date_words = re.compile(r"(?:date|day|dt|ymd|yyyymmdd|time)", re.I)
@@ -774,7 +796,7 @@ def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapsho
                     if not column_name or (payload.columns_by_table is not None and column_name not in set(payload.columns_by_table.get(table_name, []))):
                         continue
                     column_key = {**table_key, "column_name": column_name}
-                    column_values = {**column_key, "column_id": int(column.get("ordinal_position") or position), "data_type": str(column.get("type") or ""), "data_length": int(column["length"]) if str(column.get("length", "")).isdigit() else None, "data_precision": int(column["precision"]) if str(column.get("precision", "")).isdigit() else None, "data_scale": int(column["scale"]) if str(column.get("scale", "")).isdigit() else None, "null_yn": "N" if column.get("nullable") is False else "Y", "pk_yn": "Y" if column_name in pk_names else "N", "partition_key_yn": flag_candidates["partition_key_yn"].get(column_name, "N"), "update_base_yn": flag_candidates["update_base_yn"].get(column_name, "N"), "comments": column.get("comment")}
+                    column_values = {**column_key, "column_id": int(column.get("ordinal_position") or position), "data_type": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[0], "data_length": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[1], "data_precision": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[2], "data_scale": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[3], "null_yn": "N" if column.get("nullable") is False else "Y", "pk_yn": "Y" if column_name in pk_names else "N", "partition_key_yn": flag_candidates["partition_key_yn"].get(column_name, "N"), "update_base_yn": flag_candidates["update_base_yn"].get(column_name, "N"), "comments": column.get("comment")}
                     column_values = {name: value for name, value in column_values.items() if name in column_columns}
                     column_where = and_(*[column_columns[key] == column_key[key] for key in column_keys])
                     if connection.execute(select(columns).where(column_where)).first():
@@ -836,10 +858,7 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
                 target_column = MetaColumnExt(**column_key)
                 session.add(target_column)
             target_column.column_id = int(column.get("ordinal_position") or position)
-            target_column.data_type = str(column.get("type") or "")
-            target_column.data_length = int(column["length"]) if str(column.get("length", "")).isdigit() else None
-            target_column.data_precision = int(column["precision"]) if str(column.get("precision", "")).isdigit() else None
-            target_column.data_scale = int(column["scale"]) if str(column.get("scale", "")).isdigit() else None
+            target_column.data_type, target_column.data_length, target_column.data_precision, target_column.data_scale = _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))
             target_column.null_yn = "N" if column.get("nullable") is False else "Y"
             target_column.pk_yn = "Y" if column_name in pk_names else "N"
             target_column.partition_key_yn = flag_candidates["partition_key_yn"].get(column_name, "N")
