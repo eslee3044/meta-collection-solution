@@ -39,6 +39,44 @@ def _safe(call, default):
         return default
 
 
+def _normalize_column_metadata(column: dict) -> dict:
+    normalized = dict(column)
+    normalized.pop("precision_value", None)
+    normalized.pop("scale_value", None)
+    normalized["name"] = str(normalized.get("name") or "")
+    raw_type = str(normalized.get("type") or "").strip()
+    match = re.match(r"^([A-Za-z][A-Za-z0-9_ ]*?)(?:\s*\(([^)]*)\))?(?:\s+COLLATE\b.*)?$", raw_type, re.IGNORECASE)
+    if match:
+        normalized["type"] = match.group(1).strip().upper()
+        parts = [part.strip() for part in (match.group(2) or "").split(",") if part.strip()]
+        if len(parts) == 1 and normalized.get("length") is None and parts[0].isdigit():
+            normalized["length"] = int(parts[0])
+        elif len(parts) == 2:
+            if normalized.get("precision") is None and parts[0].isdigit():
+                normalized["precision"] = int(parts[0])
+            if normalized.get("scale") is None and parts[1].isdigit():
+                normalized["scale"] = int(parts[1])
+    else:
+        normalized["type"] = raw_type
+    return normalized
+
+
+def _source_columns(connection: Connection, inspector, source: DataSource, schema_name: str, table_name: str) -> list[dict]:
+    if source.db_type in {"mysql", "mariadb"}:
+        rows = connection.execute(text("""
+            SELECT COLUMN_NAME AS name, ORDINAL_POSITION AS ordinal_position,
+                   DATA_TYPE AS type, CHARACTER_MAXIMUM_LENGTH AS length,
+                   NUMERIC_PRECISION AS precision_value, NUMERIC_SCALE AS scale_value,
+                   CASE WHEN IS_NULLABLE = 'YES' THEN TRUE ELSE FALSE END AS nullable,
+                   COLUMN_DEFAULT AS default_value, COLUMN_COMMENT AS comment
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = :schema AND TABLE_NAME = :table
+            ORDER BY ORDINAL_POSITION
+        """), {"schema": schema_name, "table": table_name}).mappings().all()
+        return [_normalize_column_metadata({**dict(row), "precision": row.get("precision_value"), "scale": row.get("scale_value")}) for row in rows]
+    return [_normalize_column_metadata(dict(column)) for column in inspector.get_columns(table_name, schema=schema_name)]
+
+
 def _url(source: DataSource, host: str, port: int | None) -> str:
     secret = decrypt_json(source.secret_encrypted)
     password = quote_plus(secret.get("password", ""))
@@ -413,7 +451,7 @@ def collect_schema(
                     table = {
                         "name": table_name,
                         "comment": (_safe(lambda: inspector.get_table_comment(table_name, schema=schema_name), {}) or {}).get("text"),
-                        "columns": inspector.get_columns(table_name, schema=schema_name),
+                        "columns": _source_columns(connection, inspector, source, schema_name, table_name),
                         "primary_key": _safe(lambda: inspector.get_pk_constraint(table_name, schema=schema_name), {}),
                         "foreign_keys": _safe(lambda: inspector.get_foreign_keys(table_name, schema=schema_name), []),
                         "indexes": _safe(lambda: inspector.get_indexes(table_name, schema=schema_name), []) if "INDEX" in items else [],

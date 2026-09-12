@@ -3,9 +3,22 @@ from pathlib import Path
 from sqlalchemy import create_engine, text
 
 from app.capabilities import is_supported_db_type, supported_db_types
-from app.collector import collect_schema
+from app.collector import _normalize_column_metadata, collect_schema
 from app.models import DataSource
 from app.scheduler import apply_storage_growth
+
+
+
+def test_column_type_metadata_is_split_without_collation_leaking():
+    varchar = _normalize_column_metadata({"name": "customer_name", "type": 'VARCHAR(10) COLLATE "utf8_bin"'})
+    decimal = _normalize_column_metadata({"name": "amount", "type": "DECIMAL(10,2)"})
+    assert varchar["name"] == "customer_name"
+    assert varchar["type"] == "VARCHAR"
+    assert varchar["length"] == 10
+    assert decimal["name"] == "amount"
+    assert decimal["type"] == "DECIMAL"
+    assert decimal["precision"] == 10
+    assert decimal["scale"] == 2
 
 
 def test_oracle_procedure_collection_includes_definition(monkeypatch):

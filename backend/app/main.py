@@ -749,6 +749,13 @@ def _informatica_name_rules(system_cd: str, instance_div_cd: str) -> dict[str, s
     }
 
 
+def _target_table_name(table_name: str, suffix: object) -> str:
+    normalized_suffix = str(suffix or "").strip()
+    if not normalized_suffix or normalized_suffix.upper() == "N":
+        return table_name
+    return f"{table_name}_{normalized_suffix.lstrip('_')}"
+
+
 def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapshot, source: DataSource, config: MetaTableConfig) -> tuple[int, int]:
     available = {table["name"]: (schema["name"], table) for schema in snapshot.payload.get("schemas", []) for table in schema.get("tables", [])}
     selected = set(payload.table_names)
@@ -777,7 +784,7 @@ def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapsho
             for table_name in payload.table_names:
                 owner, table = available[table_name]
                 table_key = {"system_cd": payload.system_cd, "instance_name": snapshot.payload.get("source", ""), "postfix": payload.postfix, "owner": owner, "table_name": table_name}
-                target_name = f"{table_name}{payload.target_name_suffix}"
+                target_name = _target_table_name(table_name, payload.target_name_suffix)
                 rules = _informatica_name_rules(payload.system_cd, payload.instance_div_cd)
                 table_comment = (payload.table_comments or {}).get(table_name, table.get("comment") or "")
                 values = {**table_key, "database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": "TABLE", "partition_col_modifiable_yn": "Y"}
@@ -834,7 +841,7 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
     table_count = column_count = 0
     for table_name in payload.table_names:
         schema_name, table = available[table_name]
-        target_name = f"{table_name}{payload.target_name_suffix}"
+        target_name = _target_table_name(table_name, payload.target_name_suffix)
         rules = _informatica_name_rules(payload.system_cd, payload.instance_div_cd)
         table_comment = (payload.table_comments or {}).get(table_name, table.get("comment") or "")
         table_key = {"system_cd": payload.system_cd, "instance_name": snapshot.payload.get("source", ""), "postfix": payload.postfix, "owner": schema_name, "table_name": table_name}
