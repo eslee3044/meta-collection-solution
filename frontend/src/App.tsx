@@ -313,7 +313,7 @@ function RegisteredMetadataPage() {
   const pageStart=Math.max(1,Math.min(page-2,pages-4)); const pageEnd=Math.min(pages,pageStart+4); const pageNumbers=Array.from({length:Math.max(0,pageEnd-pageStart+1)},(_,index)=>pageStart+index)
   useEffect(() => { localStorage.setItem('metavault.pageSize', String(pageSize)) }, [pageSize])
   useEffect(() => { setPage(1); setSelected(null) }, [query, sourceFilter])
-  const normalizeColumn = (column: any) => { const rawType = String(column.data_type || ''); const match = rawType.match(/^\s*([^()]+?)\s*(?:\(([^)]*)\))?\s*$/); const dataType = (match?.[1] || rawType).trim(); const parts = (match?.[2] || '').split(',').map(value => value.trim()).filter(Boolean).map(Number); return { ...column, data_type: dataType, data_length: column.data_length ?? (parts.length === 1 && Number.isFinite(parts[0]) ? parts[0] : null), data_precision: column.data_precision ?? (parts.length === 2 && Number.isFinite(parts[0]) ? parts[0] : null), data_scale: column.data_scale ?? (parts.length === 2 && Number.isFinite(parts[1]) ? parts[1] : null) } }
+  const normalizeColumn = (column: any) => { const rawType = String(column.data_type || '').trim().replace(/\s+COLLATE\s+(?:"[^"]+"|'[^']+'|\S+).*$/i, '').replace(/\s+(?:CHARACTER\s+SET|CHARSET)\s+\S+/gi, '').trim(); const match = rawType.match(/^\s*([^()]+?)\s*(?:\(([^)]*)\))?\s*$/); const dataType = (match?.[1] || rawType).trim().toUpperCase(); const parts = (match?.[2] || '').split(',').map(value => value.trim()).filter(Boolean).map(Number); return { ...column, data_type: dataType, data_length: column.data_length ?? (parts.length === 1 && Number.isFinite(parts[0]) ? parts[0] : null), data_precision: column.data_precision ?? (parts.length === 2 && Number.isFinite(parts[0]) ? parts[0] : null), data_scale: column.data_scale ?? (parts.length === 2 && Number.isFinite(parts[1]) ? parts[1] : null) } }
   const choose = (table: any) => { const copy = { ...JSON.parse(JSON.stringify(table)), columns: (table.columns || []).map(normalizeColumn) }; setSelected(copy); setOriginal(JSON.parse(JSON.stringify(copy))); setMessage(''); setSort({ key: 'column_id', direction: 'asc' }) }
   const flagColumns = (table: any, key: string) => (table.columns || []).filter((column: any) => column[key] === 'Y').map((column: any) => column.column_name).join(', ') || '-'
   const sortColumns = (key: string) => { const direction = sort.key === key && sort.direction === 'asc' ? 'desc' : 'asc'; setSort({ key, direction }); setSelected((current: any) => current ? { ...current, columns: [...current.columns].sort((a, b) => { const left = a[key] ?? ''; const right = b[key] ?? ''; return String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: 'base' }) * (direction === 'asc' ? 1 : -1) }) } : current) }
@@ -341,6 +341,17 @@ function informaticaNameRules(systemCode: string, instanceCode: string) {
   return { sess: 's_m_%SYSTEM_CD%_%TGT_TABLE_NAME%', mapp: 'm_%SYSTEM_CD%_%TGT_TABLE_NAME%', tgt: '%SYSTEM_CD%_%TGT_TABLE_NAME%' }
 }
 
+function normalizeSourceColumn(column: any) {
+  const rawType = String(column.type || '').trim()
+    .replace(/\s+COLLATE\s+(?:"[^"]+"|'[^']+'|\S+).*$/i, '')
+    .replace(/\s+(?:CHARACTER\s+SET|CHARSET)\s+\S+/gi, '')
+    .trim()
+  const match = rawType.match(/^\s*([^()]+?)\s*(?:\(([^)]*)\))?\s*$/)
+  const dataType = (match?.[1] || rawType).trim().toUpperCase()
+  const parts = (match?.[2] || '').split(',').map(value => value.trim()).filter(Boolean).map(Number)
+  return { ...column, type: dataType, length: column.length ?? (parts.length === 1 && Number.isFinite(parts[0]) ? parts[0] : null), precision: column.precision ?? (parts.length === 2 && Number.isFinite(parts[0]) ? parts[0] : null), scale: column.scale ?? (parts.length === 2 && Number.isFinite(parts[1]) ? parts[1] : null) }
+}
+
 function ColumnSelectionModal({ table, selected, onToggle, onClose }: { table: any; selected: string[]; onToggle: (name: string, checked: boolean) => void; onClose: () => void }) {
   const [query, setQuery] = useState('')
   const recommendedMap = recommendationMap(table.columns || [])
@@ -354,7 +365,7 @@ function ColumnSelectionModal({ table, selected, onToggle, onClose }: { table: a
 }
 
 function RegisterMetadataDialog({ snapshot, onClose, onDone }: { snapshot: any; onClose: () => void; onDone: () => void }) {
-  const tables = snapshot.payload.schemas.flatMap((schema: any) => (schema.tables || []).map((table: any) => ({ ...table, schema: schema.name })))
+  const tables = snapshot.payload.schemas.flatMap((schema: any) => (schema.tables || []).map((table: any) => ({ ...table, columns: (table.columns || []).map(normalizeSourceColumn), schema: schema.name })))
   const [selected, setSelected] = useState<string[]>([])
   const [selectedColumns, setSelectedColumns] = useState<Record<string, string[]>>({})
   const [expanded, setExpanded] = useState<string[]>([])

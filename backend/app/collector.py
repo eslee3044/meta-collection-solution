@@ -45,6 +45,8 @@ def _normalize_column_metadata(column: dict) -> dict:
     normalized.pop("scale_value", None)
     normalized["name"] = str(normalized.get("name") or "")
     raw_type = str(normalized.get("type") or "").strip()
+    raw_type = re.sub(r"\s+COLLATE\s+(?:\"[^\"]+\"|'[^']+'|\S+).*$", "", raw_type, flags=re.IGNORECASE).strip()
+    raw_type = re.sub(r"\s+(?:CHARACTER\s+SET|CHARSET)\s+\S+", "", raw_type, flags=re.IGNORECASE).strip()
     match = re.match(r"^([A-Za-z][A-Za-z0-9_ ]*?)(?:\s*\(([^)]*)\))?(?:\s+COLLATE\b.*)?$", raw_type, re.IGNORECASE)
     if match:
         normalized["type"] = match.group(1).strip().upper()

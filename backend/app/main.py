@@ -680,6 +680,8 @@ def metadata_register_script(session: Session = Depends(get_session), _: User = 
 
 def _split_data_type(value: object, length: object = None, precision: object = None, scale: object = None) -> tuple[str, int | None, int | None, int | None]:
     raw = str(value or "").strip()
+    raw = re.sub(r"\s+COLLATE\s+(?:\"[^\"]+\"|'[^']+'|\S+).*$", "", raw, flags=re.IGNORECASE).strip()
+    raw = re.sub(r"\s+(?:CHARACTER\s+SET|CHARSET)\s+\S+", "", raw, flags=re.IGNORECASE).strip()
     match = re.match(r"^\s*([^()]+?)\s*(?:\(([^)]*)\))?\s*$", raw)
     data_type = (match.group(1) if match else raw).strip()
     parts = [part.strip() for part in ((match.group(2) if match else "") or "").split(",") if part.strip()]
