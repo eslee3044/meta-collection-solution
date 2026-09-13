@@ -183,7 +183,7 @@ def source_engine(source: DataSource) -> Iterator[Engine]:
 def test_source(source: DataSource) -> None:
     assert_supported_db_type(source.db_type)
     with source_engine(source) as engine, engine.connect() as connection:
-        connection.execute(text("SELECT 1"))
+        connection.execute(text("SELECT 1 FROM DUAL" if source.db_type == "oracle" else "SELECT 1"))
 
 
 def available_schema_names(source: DataSource) -> list[str]:

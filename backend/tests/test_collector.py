@@ -3,7 +3,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, text
 
 from app.capabilities import is_supported_db_type, supported_db_types
-from app.collector import _normalize_column_metadata, collect_schema
+from app.collector import _normalize_column_metadata, collect_schema, test_source
 from app.main import _split_data_type
 from app.models import DataSource
 from app.scheduler import apply_storage_growth
@@ -22,6 +22,32 @@ def test_column_type_metadata_is_split_without_collation_leaking():
     assert decimal["scale"] == 2
     assert _split_data_type('VARCHAR(2500) COLLATE "utf8_bin"') == ("VARCHAR", 2500, None, None)
     assert _split_data_type("VARCHAR(2500) CHARACTER SET utf8mb4") == ("VARCHAR", 2500, None, None)
+
+
+
+
+def test_oracle_connection_probe_uses_dual(monkeypatch):
+    from app import collector
+
+    captured = []
+
+    class Connection:
+        def execute(self, statement):
+            captured.append(str(statement))
+
+    class EngineContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def connect(self):
+            return self
+
+    monkeypatch.setattr(collector, "source_engine", lambda source: EngineContext())
+    test_source(DataSource(name="oracle", db_type="oracle", database="ORCL", host="db", username="reader"))
+    assert captured == ["SELECT 1 FROM DUAL"]
 
 
 def test_oracle_procedure_collection_includes_definition(monkeypatch):
