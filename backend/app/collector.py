@@ -422,6 +422,18 @@ def _collect_select_permissions(connection: Connection, source: DataSource, sche
     return {row["name"]: {"select": True, "privileges": ["SELECT"], "checked_as": source.username or "current_user"} for row in rows}
 
 
+def _source_table_names(connection: Connection, inspector, source: DataSource, schema_name: str) -> list[str]:
+    if source.db_type == "oracle":
+        rows = connection.execute(text("""
+            SELECT table_name AS name
+            FROM all_tables
+            WHERE owner = UPPER(:schema)
+            ORDER BY table_name
+        """), {"schema": schema_name}).mappings().all()
+        return [str(row["name"]) for row in rows]
+    return inspector.get_table_names(schema=schema_name)
+
+
 def collect_schema(
     source: DataSource,
     selected_schemas: list[str] | None = None,
@@ -449,7 +461,7 @@ def collect_schema(
                 schema = {"name": schema_name, "tables": [], "views": [], "procedures": _collect_procedures(connection, source, schema_name) if "PROCEDURE" in items else []}
                 permissions = _collect_select_permissions(connection, source, schema_name) if "SELECT PRIVILEGE" in items else {}
                 storage_metrics = _storage_metrics(connection, source, schema_name) if include_storage else {}
-                for table_name in inspector.get_table_names(schema=schema_name) if "TABLE" in items else []:
+                for table_name in _source_table_names(connection, inspector, source, schema_name) if "TABLE" in items else []:
                     table = {
                         "name": table_name,
                         "comment": (_safe(lambda: inspector.get_table_comment(table_name, schema=schema_name), {}) or {}).get("text"),
