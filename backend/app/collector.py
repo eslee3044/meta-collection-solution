@@ -444,16 +444,10 @@ def _collect_select_permissions(connection: Connection, source: DataSource, sche
 def _source_table_names(connection: Connection, inspector, source: DataSource, schema_name: str) -> list[str]:
     if source.db_type == "oracle":
         rows = connection.execute(text("""
-            SELECT DISTINCT table_name AS name
-            FROM dba_tab_privs
-            WHERE owner = UPPER(:schema)
-              AND privilege = 'SELECT'
-              AND (grantee = USER OR grantee = 'PUBLIC' OR grantee IN (SELECT role FROM session_roles))
-            UNION
             SELECT table_name AS name
             FROM dba_tables
             WHERE owner = UPPER(:schema)
-            ORDER BY name
+            ORDER BY table_name
         """), {"schema": schema_name}).mappings().all()
         return [str(row["name"]) for row in rows]
     return inspector.get_table_names(schema=schema_name)
