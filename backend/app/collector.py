@@ -35,7 +35,7 @@ def _usable_schema_names(available: list[str], source: DataSource) -> list[str]:
 def _safe(call, default):
     try:
         return call()
-    except (NotImplementedError, AttributeError):
+    except (NotImplementedError, AttributeError, SQLAlchemyError):
         return default
 
 
@@ -490,18 +490,34 @@ def collect_schema(
             "collection_options": {"items": sorted(items), "storage_growth": include_storage},
             "schemas": [],
             "skipped_schemas": [],
+            "collection_diagnostics": [],
         }
         count = 0
         for schema_name in schemas:
+            diagnostic = {"schema": schema_name, "steps": [], "final_status": "started"}
+            phase = "schema"
             try:
-                schema = {"name": schema_name, "tables": [], "views": [], "procedures": _collect_procedures(connection, source, schema_name) if "PROCEDURE" in items else []}
+                phase = "procedures"
+                procedures = _collect_procedures(connection, source, schema_name) if "PROCEDURE" in items else []
+                diagnostic["steps"].append({"step": phase, "status": "success" if "PROCEDURE" in items else "skipped", "count": len(procedures)})
+                schema = {"name": schema_name, "tables": [], "views": [], "procedures": procedures}
+
+                phase = "permissions"
                 permissions = _collect_select_permissions(connection, source, schema_name) if "SELECT PRIVILEGE" in items else {}
+                diagnostic["steps"].append({"step": phase, "status": "success" if "SELECT PRIVILEGE" in items and permissions else "skipped", "count": len(permissions)})
+
+                phase = "storage"
                 storage_metrics = _storage_metrics(connection, source, schema_name) if include_storage else {}
-                for table_name in _source_table_names(connection, inspector, source, schema_name) if "TABLE" in items else []:
+                diagnostic["steps"].append({"step": phase, "status": "success" if include_storage else "skipped", "count": len(storage_metrics)})
+
+                phase = "tables"
+                table_names = _source_table_names(connection, inspector, source, schema_name) if "TABLE" in items else []
+                diagnostic["steps"].append({"step": phase, "status": "success" if "TABLE" in items else "skipped", "count": len(table_names)})
+                for table_name in table_names:
                     table = {
                         "name": table_name,
                         "comment": (_safe(lambda: inspector.get_table_comment(table_name, schema=schema_name), {}) or {}).get("text"),
-                        "columns": _source_columns(connection, inspector, source, schema_name, table_name),
+                        "columns": _safe(lambda: _source_columns(connection, inspector, source, schema_name, table_name), []),
                         "primary_key": _safe(lambda: inspector.get_pk_constraint(table_name, schema=schema_name), {}),
                         "foreign_keys": _safe(lambda: inspector.get_foreign_keys(table_name, schema=schema_name), []),
                         "indexes": _safe(lambda: inspector.get_indexes(table_name, schema=schema_name), []) if "INDEX" in items else [],
@@ -514,14 +530,23 @@ def collect_schema(
                         column["type"] = str(column["type"])
                     schema["tables"].append(table)
                     count += 1
-                for view_name in _source_view_names(connection, inspector, source, schema_name) if "VIEW" in items else []:
-                    schema["views"].append({"name": view_name, "definition": inspector.get_view_definition(view_name, schema=schema_name), "permissions": permissions.get(view_name, permissions.get("*", {"select": None, "privileges": [], "checked_as": "not_collected"}))})
+
+                phase = "views"
+                view_names = _source_view_names(connection, inspector, source, schema_name) if "VIEW" in items else []
+                for view_name in view_names:
+                    schema["views"].append({"name": view_name, "definition": _safe(lambda: inspector.get_view_definition(view_name, schema=schema_name), None), "permissions": permissions.get(view_name, permissions.get("*", {"select": None, "privileges": [], "checked_as": "not_collected"}))})
                     count += 1
+                diagnostic["steps"].append({"step": phase, "status": "success" if "VIEW" in items else "skipped", "count": len(view_names)})
+
                 count += len(schema["procedures"])
                 result["schemas"].append(schema)
+                diagnostic["final_status"] = "success"
             except SQLAlchemyError as exc:
                 error_detail = re.sub(r"(://[^:/]+:)[^@]+(@)", r"\1[REDACTED]\2", str(exc))[:1000]
-                result["skipped_schemas"].append({"name": schema_name, "reason": "접근 권한이 없거나 메타데이터를 조회할 수 없습니다.", "error": error_detail})
-                continue
+                diagnostic["steps"].append({"step": phase, "status": "error", "error": error_detail})
+                diagnostic["final_status"] = "skipped"
+                result["skipped_schemas"].append({"name": schema_name, "reason": "접근 권한이 없거나 메타데이터를 조회할 수 없습니다.", "failed_step": phase, "error": error_detail})
+            finally:
+                result["collection_diagnostics"].append(diagnostic)
     raw = json.dumps(result, sort_keys=True, default=str).encode()
     return result, count, hashlib.sha256(raw).hexdigest()
