@@ -74,7 +74,7 @@ def _source_columns(connection: Connection, inspector, source: DataSource, schem
                    data_scale AS scale_value,
                    CASE WHEN nullable = 'Y' THEN 1 ELSE 0 END AS nullable,
                    data_default AS default_value
-            FROM all_tab_columns
+            FROM dba_tab_columns
             WHERE owner = UPPER(:schema)
               AND table_name = UPPER(:table)
             ORDER BY column_id
@@ -204,11 +204,14 @@ def test_source(source: DataSource) -> None:
 
 def available_schema_names(source: DataSource) -> list[str]:
     with source_engine(source) as engine:
+        if source.db_type == "oracle":
+            with engine.connect() as connection:
+                names = [row["name"] for row in connection.execute(text("SELECT username AS name FROM dba_users ORDER BY username")).mappings()]
+            return sorted(set(str(name).upper() for name in names))
         available = inspect(engine).get_schema_names()
     configured_dataset = (source.options or {}).get("dataset") if source.db_type == "bigquery" else None
-    return sorted(set([configured_dataset] if configured_dataset else [
-        name for name in _usable_schema_names(available, source)
-    ]))
+    names = [configured_dataset] if configured_dataset else _usable_schema_names(available, source)
+    return sorted(set(name.upper() for name in names)) if source.db_type == "oracle" else sorted(set(names))
 
 
 def _storage_metrics(connection: Connection, source: DataSource, schema_name: str) -> dict[str, dict]:
@@ -268,14 +271,14 @@ def _storage_metrics(connection: Connection, source: DataSource, schema_name: st
                    COALESCE(ix.index_bytes, 0) AS index_bytes,
                    COALESCE(ds.data_bytes, 0) + COALESCE(ix.index_bytes, 0) AS total_bytes,
                    t.num_rows AS row_estimate
-            FROM all_tables t
+            FROM dba_tables t
             LEFT JOIN (
-              SELECT owner, segment_name, SUM(bytes) AS data_bytes FROM all_segments
+              SELECT owner, segment_name, SUM(bytes) AS data_bytes FROM dba_segments
               WHERE segment_type LIKE 'TABLE%' GROUP BY owner, segment_name
             ) ds ON ds.owner = t.owner AND ds.segment_name = t.table_name
             LEFT JOIN (
               SELECT i.table_owner, i.table_name, SUM(s.bytes) AS index_bytes
-              FROM all_indexes i JOIN all_segments s ON s.owner = i.owner AND s.segment_name = i.index_name
+              FROM dba_indexes i JOIN dba_segments s ON s.owner = i.owner AND s.segment_name = i.index_name
               WHERE s.segment_type LIKE 'INDEX%' GROUP BY i.table_owner, i.table_name
             ) ix ON ix.table_owner = t.owner AND ix.table_name = t.table_name
             WHERE t.owner = :schema
@@ -334,7 +337,7 @@ def _collect_procedures(connection: Connection, source: DataSource, schema_name:
         "mysql": "SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS routine_type, DTD_IDENTIFIER AS return_type, ROUTINE_DEFINITION AS definition FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = :schema",
         "mariadb": "SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS routine_type, DTD_IDENTIFIER AS return_type, ROUTINE_DEFINITION AS definition FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = :schema",
         "mssql": "SELECT o.name, o.type_desc AS routine_type, OBJECT_DEFINITION(o.object_id) AS definition FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE s.name = :schema AND o.type IN ('P', 'PC', 'FN', 'IF', 'TF')",
-        "oracle": "SELECT p.object_name AS name, p.object_type AS routine_type, LISTAGG(s.text, CHR(10)) WITHIN GROUP (ORDER BY s.line) AS definition FROM all_procedures p LEFT JOIN all_source s ON s.owner = p.owner AND s.name = p.object_name AND s.type = CASE WHEN p.object_type = 'PACKAGE' THEN 'PACKAGE BODY' ELSE p.object_type END WHERE p.owner = :schema AND p.object_type IN ('PROCEDURE', 'FUNCTION', 'PACKAGE') GROUP BY p.object_name, p.object_type",
+        "oracle": "SELECT p.object_name AS name, p.object_type AS routine_type, LISTAGG(s.text, CHR(10)) WITHIN GROUP (ORDER BY s.line) AS definition FROM dba_procedures p LEFT JOIN dba_source s ON s.owner = p.owner AND s.name = p.object_name AND s.type = CASE WHEN p.object_type = 'PACKAGE' THEN 'PACKAGE BODY' ELSE p.object_type END WHERE p.owner = :schema AND p.object_type IN ('PROCEDURE', 'FUNCTION', 'PACKAGE') GROUP BY p.object_name, p.object_type",
         "db2": "SELECT ROUTINENAME AS name, ROUTINETYPE AS routine_type, TEXT AS definition FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = :schema",
     }
     if source.db_type in {"sqlite", "bigquery"}:
@@ -431,7 +434,7 @@ def _collect_select_permissions(connection: Connection, source: DataSource, sche
                   )
         """,
         "mssql": "SELECT o.name FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE s.name = :schema AND o.type IN ('U', 'V') AND HAS_PERMS_BY_NAME(QUOTENAME(s.name) + '.' + QUOTENAME(o.name), 'OBJECT', 'SELECT') = 1",
-        "oracle": "SELECT table_name AS name FROM all_tab_privs WHERE owner = :schema AND privilege = 'SELECT' AND (grantee = USER OR grantee = 'PUBLIC') UNION SELECT table_name AS name FROM all_tables WHERE owner = :schema AND owner = USER UNION SELECT view_name AS name FROM all_views WHERE owner = :schema AND owner = USER",
+        "oracle": "SELECT table_name AS name FROM dba_tab_privs WHERE owner = :schema AND privilege = 'SELECT' AND (grantee = USER OR grantee = 'PUBLIC') UNION SELECT table_name AS name FROM dba_tables WHERE owner = :schema AND owner = USER UNION SELECT view_name AS name FROM dba_views WHERE owner = :schema AND owner = USER",
         "db2": "SELECT TABNAME AS name FROM SYSCAT.TABAUTH WHERE TABSCHEMA = :schema AND SELECTAUTH IN ('Y', 'G', 'A') AND (GRANTEE = CURRENT USER OR GRANTEETYPE = 'P')",
     }
     rows = _query_rows(connection, queries[source.db_type], {"schema": schema_name})
@@ -442,18 +445,30 @@ def _source_table_names(connection: Connection, inspector, source: DataSource, s
     if source.db_type == "oracle":
         rows = connection.execute(text("""
             SELECT DISTINCT table_name AS name
-            FROM all_tab_privs
+            FROM dba_tab_privs
             WHERE owner = UPPER(:schema)
               AND privilege = 'SELECT'
               AND (grantee = USER OR grantee = 'PUBLIC' OR grantee IN (SELECT role FROM session_roles))
             UNION
             SELECT table_name AS name
-            FROM all_tables
+            FROM dba_tables
             WHERE owner = UPPER(:schema)
             ORDER BY name
         """), {"schema": schema_name}).mappings().all()
         return [str(row["name"]) for row in rows]
     return inspector.get_table_names(schema=schema_name)
+
+
+def _source_view_names(connection: Connection, inspector, source: DataSource, schema_name: str) -> list[str]:
+    if source.db_type == "oracle":
+        rows = connection.execute(text("""
+            SELECT view_name AS name
+            FROM dba_views
+            WHERE owner = UPPER(:schema)
+            ORDER BY view_name
+        """), {"schema": schema_name}).mappings().all()
+        return [str(row["name"]) for row in rows]
+    return inspector.get_view_names(schema=schema_name)
 
 
 def collect_schema(
@@ -466,9 +481,14 @@ def collect_schema(
     items = {item.upper() for item in (selected_items or DEFAULT_COLLECTION_ITEMS) if item.upper() in ALL_COLLECTION_ITEMS}
     with source_engine(source) as engine, engine.connect() as connection:
         inspector = inspect(engine)
-        available = inspector.get_schema_names()
+        if source.db_type == "oracle":
+            available = [row["name"] for row in connection.execute(text("SELECT username AS name FROM dba_users ORDER BY username")).mappings()]
+        else:
+            available = inspector.get_schema_names()
         configured_dataset = (source.options or {}).get("dataset") if source.db_type == "bigquery" else None
         schemas = selected_schemas or ([configured_dataset] if configured_dataset else _usable_schema_names(available, source))
+        if source.db_type == "oracle":
+            schemas = [schema.upper() for schema in schemas]
         result = {
             "source": source.name,
             "db_type": source.db_type,
@@ -500,7 +520,7 @@ def collect_schema(
                         column["type"] = str(column["type"])
                     schema["tables"].append(table)
                     count += 1
-                for view_name in inspector.get_view_names(schema=schema_name) if "VIEW" in items else []:
+                for view_name in _source_view_names(connection, inspector, source, schema_name) if "VIEW" in items else []:
                     schema["views"].append({"name": view_name, "definition": inspector.get_view_definition(view_name, schema=schema_name), "permissions": permissions.get(view_name, permissions.get("*", {"select": None, "privileges": [], "checked_as": "not_collected"}))})
                     count += 1
                 count += len(schema["procedures"])
