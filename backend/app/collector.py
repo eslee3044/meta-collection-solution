@@ -525,8 +525,9 @@ def collect_schema(
                     count += 1
                 count += len(schema["procedures"])
                 result["schemas"].append(schema)
-            except SQLAlchemyError:
-                result["skipped_schemas"].append({"name": schema_name, "reason": "접근 권한이 없거나 메타데이터를 조회할 수 없습니다."})
+            except SQLAlchemyError as exc:
+                error_detail = re.sub(r"(://[^:/]+:)[^@]+(@)", r"\1[REDACTED]\2", str(exc))[:1000]
+                result["skipped_schemas"].append({"name": schema_name, "reason": "접근 권한이 없거나 메타데이터를 조회할 수 없습니다.", "error": error_detail})
                 continue
     raw = json.dumps(result, sort_keys=True, default=str).encode()
     return result, count, hashlib.sha256(raw).hexdigest()
