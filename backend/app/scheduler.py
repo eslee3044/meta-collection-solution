@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import json
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -42,6 +43,20 @@ def execute_job(job_id: int) -> int:
             current_step = "collect_schema"
             log("info", "collect_schema", "스키마 메타데이터 수집을 시작합니다.")
             payload, count, fingerprint = collect_schema(job.data_source, job.schemas, job.collect_storage, job.collection_items)
+            schema_count = len(payload.get("schemas", []))
+            table_count = sum(len(schema.get("tables", [])) for schema in payload.get("schemas", []))
+            view_count = sum(len(schema.get("views", [])) for schema in payload.get("schemas", []))
+            procedure_count = sum(len(schema.get("procedures", [])) for schema in payload.get("schemas", []))
+            diagnostic = {
+                "schemas": [schema.get("name") for schema in payload.get("schemas", [])],
+                "table_count": table_count,
+                "view_count": view_count,
+                "procedure_count": procedure_count,
+                "collection_items": job.collection_items,
+                "requested_schemas": job.schemas,
+                "skipped_schemas": payload.get("skipped_schemas", []),
+            }
+            log("info" if count else "warning", "collect_schema", f"수집 결과: 스키마 {schema_count}개, 테이블 {table_count}개, 뷰 {view_count}개, 프로시저 {procedure_count}개", json.dumps(diagnostic, ensure_ascii=False, default=str))
             if job.collect_storage:
                 current_step = "storage_growth"
                 log("info", "storage_growth", "스토리지 증감량을 계산합니다.")
