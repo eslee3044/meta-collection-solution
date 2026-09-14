@@ -64,6 +64,22 @@ def _normalize_column_metadata(column: dict) -> dict:
 
 
 def _source_columns(connection: Connection, inspector, source: DataSource, schema_name: str, table_name: str) -> list[dict]:
+    if source.db_type == "oracle":
+        rows = connection.execute(text("""
+            SELECT column_name AS name,
+                   column_id AS ordinal_position,
+                   data_type AS type,
+                   data_length AS length,
+                   data_precision AS precision_value,
+                   data_scale AS scale_value,
+                   CASE WHEN nullable = 'Y' THEN 1 ELSE 0 END AS nullable,
+                   data_default AS default_value
+            FROM all_tab_columns
+            WHERE owner = UPPER(:schema)
+              AND table_name = UPPER(:table)
+            ORDER BY column_id
+        """), {"schema": schema_name, "table": table_name}).mappings().all()
+        return [_normalize_column_metadata({**dict(row), "precision": row.get("precision_value"), "scale": row.get("scale_value")}) for row in rows]
     if source.db_type in {"mysql", "mariadb"}:
         rows = connection.execute(text("""
             SELECT COLUMN_NAME AS name, ORDINAL_POSITION AS ordinal_position,
@@ -425,10 +441,16 @@ def _collect_select_permissions(connection: Connection, source: DataSource, sche
 def _source_table_names(connection: Connection, inspector, source: DataSource, schema_name: str) -> list[str]:
     if source.db_type == "oracle":
         rows = connection.execute(text("""
+            SELECT DISTINCT table_name AS name
+            FROM all_tab_privs
+            WHERE owner = UPPER(:schema)
+              AND privilege = 'SELECT'
+              AND (grantee = USER OR grantee = 'PUBLIC' OR grantee IN (SELECT role FROM session_roles))
+            UNION
             SELECT table_name AS name
             FROM all_tables
             WHERE owner = UPPER(:schema)
-            ORDER BY table_name
+            ORDER BY name
         """), {"schema": schema_name}).mappings().all()
         return [str(row["name"]) for row in rows]
     return inspector.get_table_names(schema=schema_name)
