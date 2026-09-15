@@ -37,12 +37,16 @@ def execute_job(job_id: int) -> int:
             session.add(RunLog(run_id=run.id, sequence=sequence, level=level, step=step, message=message[:1000], details=details[:4000] if details else None))
             session.commit()
 
+        def progress(step: str, status: str, message: str, details: dict | None = None) -> None:
+            level = "error" if status == "error" else "info"
+            log(level, step, message, json.dumps({"status": status, **(details or {})}, ensure_ascii=False, default=str))
+
         try:
             current_step = "connect"
             log("info", "connect", "데이터 소스 연결을 시작합니다.")
             current_step = "collect_schema"
             log("info", "collect_schema", "스키마 메타데이터 수집을 시작합니다.")
-            payload, count, fingerprint = collect_schema(job.data_source, job.schemas, job.collect_storage, job.collection_items)
+            payload, count, fingerprint = collect_schema(job.data_source, job.schemas, job.collect_storage, job.collection_items, progress_callback=progress)
             schema_count = len(payload.get("schemas", []))
             table_count = sum(len(schema.get("tables", [])) for schema in payload.get("schemas", []))
             view_count = sum(len(schema.get("views", [])) for schema in payload.get("schemas", []))
@@ -55,6 +59,7 @@ def execute_job(job_id: int) -> int:
                 "collection_items": job.collection_items,
                 "requested_schemas": job.schemas,
                 "skipped_schemas": payload.get("skipped_schemas", []),
+                "collection_diagnostics": payload.get("collection_diagnostics", []),
             }
             log("info" if count else "warning", "collect_schema", f"수집 결과: 스키마 {schema_count}개, 테이블 {table_count}개, 뷰 {view_count}개, 프로시저 {procedure_count}개", json.dumps(diagnostic, ensure_ascii=False, default=str))
             if job.collect_storage:

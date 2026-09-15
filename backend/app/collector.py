@@ -4,7 +4,7 @@ import re
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 from urllib.parse import quote_plus
 
 from sqlalchemy import create_engine, inspect, text
@@ -470,6 +470,7 @@ def collect_schema(
     selected_schemas: list[str] | None = None,
     include_storage: bool = False,
     selected_items: list[str] | None = None,
+    progress_callback: Callable[[str, str, str, dict | None], None] | None = None,
 ) -> tuple[dict, int, str]:
     assert_supported_db_type(source.db_type)
     items = {item.upper() for item in (selected_items or DEFAULT_COLLECTION_ITEMS) if item.upper() in ALL_COLLECTION_ITEMS}
@@ -493,24 +494,39 @@ def collect_schema(
             "collection_diagnostics": [],
         }
         count = 0
+        def emit(step: str, status: str, message: str, details: dict | None = None) -> None:
+            if progress_callback:
+                progress_callback(step, status, message, details)
+
         for schema_name in schemas:
             diagnostic = {"schema": schema_name, "steps": [], "final_status": "started"}
             phase = "schema"
             try:
                 phase = "procedures"
+                emit(phase, "running", f"{schema_name} 프로시저 수집을 시작합니다.", {"schema": schema_name})
                 procedures = _collect_procedures(connection, source, schema_name) if "PROCEDURE" in items else []
                 diagnostic["steps"].append({"step": phase, "status": "success" if "PROCEDURE" in items else "skipped", "count": len(procedures)})
+                emit(phase, "success" if "PROCEDURE" in items else "skipped", f"{schema_name} 프로시저 수집을 완료했습니다.", {"count": len(procedures)})
                 schema = {"name": schema_name, "tables": [], "views": [], "procedures": procedures}
 
                 phase = "permissions"
+                emit(phase, "running", f"{schema_name} 조회 권한 수집을 시작합니다.", {"schema": schema_name})
                 permissions = _collect_select_permissions(connection, source, schema_name) if "SELECT PRIVILEGE" in items else {}
-                diagnostic["steps"].append({"step": phase, "status": "success" if "SELECT PRIVILEGE" in items and permissions else "skipped", "count": len(permissions)})
+                permission_status = "success" if "SELECT PRIVILEGE" in items and permissions else "skipped"
+                permission_action = "완료" if permission_status == "success" else "스킵"
+                diagnostic["steps"].append({"step": phase, "status": permission_status, "count": len(permissions)})
+                emit(phase, permission_status, f"{schema_name} 조회 권한 수집을 {permission_action}했습니다.", {"count": len(permissions), "reason": "DBA_TAB_PRIVS 미조회 또는 권한 없음" if permission_status == "skipped" else None})
 
                 phase = "storage"
+                emit(phase, "running", f"{schema_name} 스토리지 수집을 시작합니다.", {"schema": schema_name})
                 storage_metrics = _storage_metrics(connection, source, schema_name) if include_storage else {}
-                diagnostic["steps"].append({"step": phase, "status": "success" if include_storage else "skipped", "count": len(storage_metrics)})
+                storage_status = "success" if include_storage else "skipped"
+                storage_action = "완료" if include_storage else "스킵"
+                diagnostic["steps"].append({"step": phase, "status": storage_status, "count": len(storage_metrics)})
+                emit(phase, storage_status, f"{schema_name} 스토리지 수집을 {storage_action}했습니다.", {"count": len(storage_metrics)})
 
                 phase = "tables"
+                emit(phase, "running", f"{schema_name} 테이블 수집을 시작합니다.", {"schema": schema_name})
                 table_names = _source_table_names(connection, inspector, source, schema_name) if "TABLE" in items else []
                 diagnostic["steps"].append({"step": phase, "status": "success" if "TABLE" in items else "skipped", "count": len(table_names)})
                 for table_name in table_names:
@@ -530,21 +546,26 @@ def collect_schema(
                         column["type"] = str(column["type"])
                     schema["tables"].append(table)
                     count += 1
+                emit(phase, "success" if "TABLE" in items else "skipped", f"{schema_name} 테이블 수집을 완료했습니다.", {"count": len(table_names)})
 
                 phase = "views"
+                emit(phase, "running", f"{schema_name} 뷰 수집을 시작합니다.", {"schema": schema_name})
                 view_names = _source_view_names(connection, inspector, source, schema_name) if "VIEW" in items else []
                 for view_name in view_names:
                     schema["views"].append({"name": view_name, "definition": _safe(lambda: inspector.get_view_definition(view_name, schema=schema_name), None), "permissions": permissions.get(view_name, permissions.get("*", {"select": None, "privileges": [], "checked_as": "not_collected"}))})
                     count += 1
                 diagnostic["steps"].append({"step": phase, "status": "success" if "VIEW" in items else "skipped", "count": len(view_names)})
+                emit(phase, "success" if "VIEW" in items else "skipped", f"{schema_name} 뷰 수집을 완료했습니다.", {"count": len(view_names)})
 
                 count += len(schema["procedures"])
                 result["schemas"].append(schema)
                 diagnostic["final_status"] = "success"
+                emit("collect_schema", "success", f"{schema_name} 스키마 수집을 완료했습니다.", {"tables": len(schema["tables"]), "views": len(schema["views"]), "procedures": len(schema["procedures"])})
             except SQLAlchemyError as exc:
                 error_detail = re.sub(r"(://[^:/]+:)[^@]+(@)", r"\1[REDACTED]\2", str(exc))[:1000]
                 diagnostic["steps"].append({"step": phase, "status": "error", "error": error_detail})
                 diagnostic["final_status"] = "skipped"
+                emit(phase, "error", f"{schema_name} 수집 중 오류가 발생했습니다.", {"error": error_detail})
                 result["skipped_schemas"].append({"name": schema_name, "reason": "접근 권한이 없거나 메타데이터를 조회할 수 없습니다.", "failed_step": phase, "error": error_detail})
             finally:
                 result["collection_diagnostics"].append(diagnostic)
