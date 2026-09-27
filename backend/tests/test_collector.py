@@ -3,7 +3,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, text
 
 from app.capabilities import is_supported_db_type, supported_db_types
-from app.collector import _normalize_column_metadata, collect_schema, test_source
+from app.collector import _normalize_column_metadata, collect_schema, test_source as collector_test_source
 from app.main import _split_data_type
 from app.models import DataSource
 from app.scheduler import apply_storage_growth
@@ -35,6 +35,12 @@ def test_oracle_connection_probe_uses_dual(monkeypatch):
         def execute(self, statement):
             captured.append(str(statement))
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
     class EngineContext:
         def __enter__(self):
             return self
@@ -43,10 +49,10 @@ def test_oracle_connection_probe_uses_dual(monkeypatch):
             return False
 
         def connect(self):
-            return self
+            return Connection()
 
     monkeypatch.setattr(collector, "source_engine", lambda source: EngineContext())
-    test_source(DataSource(name="oracle", db_type="oracle", database="ORCL", host="db", username="reader"))
+    collector_test_source(DataSource(name="oracle", db_type="oracle", database="ORCL", host="db", username="reader"))
     assert captured == ["SELECT 1 FROM DUAL"]
 
 
@@ -70,7 +76,7 @@ def test_oracle_procedure_collection_includes_definition(monkeypatch):
     rows = collector._collect_procedures(FakeConnection(), source, "APP")
 
     assert rows[0]["definition"].startswith("CREATE OR REPLACE PROCEDURE")
-    assert "all_source" in captured["query"].lower()
+    assert "dba_source" in captured["query"].lower()
     assert captured["params"] == {"schema": "APP"}
 
 

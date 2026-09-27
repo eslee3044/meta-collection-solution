@@ -51,6 +51,6 @@ def test_collect_schema_skips_inaccessible_schema(monkeypatch):
     payload, count, fingerprint = collect_schema(source, selected_schemas=["app", "performance_schema"], selected_items=["TABLE"])
 
     assert [schema["name"] for schema in payload["schemas"]] == ["app"]
-    assert payload["skipped_schemas"] == [{"name": "performance_schema", "reason": "접근 권한이 없거나 메타데이터를 조회할 수 없습니다."}]
+    assert payload["skipped_schemas"] == [{"name": "performance_schema", "reason": "접근 권한이 없거나 메타데이터를 조회할 수 없습니다.", "failed_step": "tables", "error": "access denied"}]
     assert count == 0
     assert len(fingerprint) == 64

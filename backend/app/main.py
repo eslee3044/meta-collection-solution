@@ -23,7 +23,7 @@ from .integration import ensure_integration_views, snapshot_diff, snapshot_summa
 from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaColumnExt, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
 from .capabilities import assert_supported_db_type
 from .collector import available_schema_names, source_engine, test_source
-from .scheduler import execute_job, start_scheduler, stop_scheduler, sync_jobs
+from .scheduler import execute_job, request_run_cancel, start_scheduler, stop_scheduler, sync_jobs
 from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut
 from .security import create_token, decode_token, decrypt_json, encrypt_json, hash_password, verify_password
 from .seed import seed
@@ -76,6 +76,20 @@ async def lifespan(_: FastAPI):
             else:
                 connection.execute(text("ALTER TABLE collection_jobs ADD COLUMN collection_items JSON NOT NULL DEFAULT '[]'"))
                 connection.execute(text("UPDATE collection_jobs SET collection_items = :items"), {"items": default_items})
+    lifecycle_columns = {
+        "current_step": "VARCHAR(80) NOT NULL DEFAULT 'queued'",
+        "current_schema": "VARCHAR(255)",
+        "heartbeat_at": "TIMESTAMP WITH TIME ZONE",
+        "cancel_requested_at": "TIMESTAMP WITH TIME ZONE",
+        "cancelled_at": "TIMESTAMP WITH TIME ZONE",
+        "error_code": "VARCHAR(80)",
+    }
+    run_columns = {column["name"] for column in inspect(engine).get_columns("collection_runs")}
+    for name, definition in lifecycle_columns.items():
+        if name not in run_columns:
+            with engine.begin() as connection:
+                connection.execute(text(f'ALTER TABLE collection_runs ADD COLUMN "{name.replace(chr(34), chr(34) * 2)}" {definition}'))
+            run_columns.add(name)
     with SessionLocal() as session:
         for job in session.scalars(select(CollectionJob)).all():
             if set(job.collection_items or []) == {"INDEX", "TABLE", "VIEW", "PROCEDURE"}:
@@ -575,6 +589,16 @@ def delete_job(job_id: int, session: Session = Depends(get_session), _: User = D
 @app.get("/api/runs", response_model=list[RunOut])
 def list_runs(session: Session = Depends(get_session), _: User = Depends(require("jobs:read"))):
     return session.scalars(select(CollectionRun).order_by(desc(CollectionRun.started_at)).limit(100)).all()
+
+
+@app.post("/api/runs/{run_id}/cancel", response_model=RunOut)
+def cancel_run(run_id: int, session: Session = Depends(get_session), _: User = Depends(require("jobs:write"))):
+    try:
+        return request_run_cancel(session, run_id)
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "찾을 수 없습니다" in message else 409
+        raise HTTPException(status_code, message) from exc
 
 
 @app.get("/api/runs/{run_id}/logs", response_model=list[RunLogOut])

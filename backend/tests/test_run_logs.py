@@ -10,7 +10,7 @@ from app.models import CollectionJob, CollectionRun, RunLog
 
 def test_run_logs_are_ordered_and_expose_step_details():
     engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, tables=[table for table in Base.metadata.sorted_tables if table.schema != "EAPET"])
     with Session(engine) as session:
         job = CollectionJob(name="로그 테스트", data_source_id=1)
         session.add(job)

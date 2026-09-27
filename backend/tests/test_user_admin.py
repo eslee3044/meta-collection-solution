@@ -11,7 +11,7 @@ from app.models import User
 @pytest.fixture
 def session():
     engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, tables=[table for table in Base.metadata.sorted_tables if table.schema != "EAPET"])
     with Session(engine) as value:
         yield value
 

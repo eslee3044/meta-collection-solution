@@ -4,13 +4,41 @@ import json
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, update
 
 from .capabilities import is_supported_db_type
 from .collector import collect_schema
 from .config import get_settings
 from .database import SessionLocal
 from .models import CollectionJob, CollectionRun, RunLog, SchemaSnapshot
+
+
+class CollectionCancelled(Exception):
+    """Raised when a collection run is cooperatively cancelled."""
+
+
+def request_run_cancel(session, run_id: int) -> CollectionRun:
+    now = datetime.now(timezone.utc)
+    result = session.execute(
+        update(CollectionRun)
+        .where(
+            CollectionRun.id == run_id,
+            CollectionRun.status.in_(["queued", "running"]),
+        )
+        .values(status="cancel_requested", current_step="cancel_requested", cancel_requested_at=now, heartbeat_at=now)
+    )
+    if result.rowcount == 0:
+        run = session.get(CollectionRun, run_id)
+        if not run:
+            raise ValueError("수집 실행 기록을 찾을 수 없습니다.")
+        raise ValueError("이미 종료된 수집 실행은 취소할 수 없습니다.")
+    session.commit()
+    return session.get(CollectionRun, run_id)
+
+
+def _is_cancel_requested(session, run_id: int) -> bool:
+    status = session.scalar(select(CollectionRun.status).where(CollectionRun.id == run_id))
+    return status == "cancel_requested"
 
 
 scheduler = BackgroundScheduler(
@@ -25,14 +53,25 @@ def execute_job(job_id: int) -> int:
         job = session.get(CollectionJob, job_id)
         if not job:
             raise ValueError("수집 작업을 찾을 수 없습니다.")
-        run = CollectionRun(job_id=job.id, status="running")
+        run = CollectionRun(job_id=job.id, status="running", current_step="initializing", heartbeat_at=datetime.now(timezone.utc))
         session.add(run)
         session.commit()
         sequence = 0
         current_step = "initializing"
 
-        def log(level: str, step: str, message: str, details: str | None = None) -> None:
+        def log(level: str, step: str, message: str, details: str | None = None, check_cancel: bool = True) -> None:
             nonlocal sequence
+            if check_cancel and _is_cancel_requested(session, run.id):
+                raise CollectionCancelled("사용자가 실행 취소를 요청했습니다.")
+            now = datetime.now(timezone.utc)
+            run.current_step = step
+            run.heartbeat_at = now
+            if details:
+                try:
+                    parsed = json.loads(details)
+                    run.current_schema = parsed.get("schema") or parsed.get("current_schema")
+                except (TypeError, json.JSONDecodeError):
+                    pass
             sequence += 1
             session.add(RunLog(run_id=run.id, sequence=sequence, level=level, step=step, message=message[:1000], details=details[:4000] if details else None))
             session.commit()
@@ -75,13 +114,31 @@ def execute_job(job_id: int) -> int:
             current_step = "save_snapshot"
             log("info", "save_snapshot", f"수집 결과를 저장합니다. 객체 {count}개")
             session.add(SchemaSnapshot(data_source_id=job.data_source_id, run_id=run.id, payload=payload, fingerprint=fingerprint))
-            run.status, run.object_count = "success", count
-            log("info", "complete", "수집이 정상적으로 완료되었습니다.")
+            completed = session.execute(
+                update(CollectionRun)
+                .where(CollectionRun.id == run.id, CollectionRun.status == "running")
+                .values(status="success", object_count=count, current_step="complete")
+            )
+            if completed.rowcount != 1:
+                session.rollback()
+                raise CollectionCancelled("사용자가 실행 취소를 요청했습니다.")
+            session.commit()
+            run = session.get(CollectionRun, run.id)
+            log("info", "complete", "수집이 정상적으로 완료되었습니다.", check_cancel=False)
+        except CollectionCancelled as exc:
+            run.status = "cancelled"
+            run.cancelled_at = datetime.now(timezone.utc)
+            run.current_step = "cancelled"
+            run.error_code = "COLLECTION_CANCELLED"
+            run.error_message = str(exc)[:4000]
+            log("warning", "cancelled", "사용자 요청으로 수집을 취소했습니다.", str(exc), check_cancel=False)
         except Exception as exc:
             run.status, run.error_message = "failed", str(exc)[:4000]
-            log("error", current_step, f"수집 중 오류가 발생했습니다: {current_step}", str(exc))
+            run.error_code = "COLLECTION_FAILED"
+            log("error", current_step, f"수집 중 오류가 발생했습니다: {current_step}", str(exc), check_cancel=False)
         finally:
             run.finished_at = datetime.now(timezone.utc)
+            run.heartbeat_at = run.finished_at
             session.commit()
         return run.id
 

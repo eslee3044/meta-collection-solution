@@ -108,6 +108,12 @@ class RunOut(BaseModel):
     id: int
     job_id: int
     status: str
+    current_step: str
+    current_schema: str | None
+    heartbeat_at: datetime | None
+    cancel_requested_at: datetime | None
+    cancelled_at: datetime | None
+    error_code: str | None
     started_at: datetime
     finished_at: datetime | None
     object_count: int
