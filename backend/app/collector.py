@@ -16,6 +16,7 @@ from sshtunnel import SSHTunnelForwarder
 from .models import DataSource
 from .security import decrypt_json
 from .capabilities import assert_supported_db_type
+from .catalog import OracleCatalogProvider
 
 
 DEFAULT_PORTS = {"postgresql": 5432, "mysql": 3306, "mariadb": 3306, "mssql": 1433, "oracle": 1521, "db2": 50000}
@@ -65,21 +66,7 @@ def _normalize_column_metadata(column: dict) -> dict:
 
 def _source_columns(connection: Connection, inspector, source: DataSource, schema_name: str, table_name: str) -> list[dict]:
     if source.db_type == "oracle":
-        rows = connection.execute(text("""
-            SELECT column_name AS name,
-                   column_id AS ordinal_position,
-                   data_type AS type,
-                   data_length AS length,
-                   data_precision AS precision_value,
-                   data_scale AS scale_value,
-                   CASE WHEN nullable = 'Y' THEN 1 ELSE 0 END AS nullable,
-                   data_default AS default_value
-            FROM dba_tab_columns
-            WHERE owner = UPPER(:schema)
-              AND table_name = UPPER(:table)
-            ORDER BY column_id
-        """), {"schema": schema_name, "table": table_name}).mappings().all()
-        return [_normalize_column_metadata({**dict(row), "precision": row.get("precision_value"), "scale": row.get("scale_value")}) for row in rows]
+        return OracleCatalogProvider(source).columns(connection, schema_name, table_name)
     if source.db_type in {"mysql", "mariadb"}:
         rows = connection.execute(text("""
             SELECT COLUMN_NAME AS name, ORDINAL_POSITION AS ordinal_position,
@@ -199,15 +186,15 @@ def source_engine(source: DataSource) -> Iterator[Engine]:
 def test_source(source: DataSource) -> None:
     assert_supported_db_type(source.db_type)
     with source_engine(source) as engine, engine.connect() as connection:
-        connection.execute(text("SELECT 1 FROM DUAL" if source.db_type == "oracle" else "SELECT 1"))
+        probe = OracleCatalogProvider(source).probe_sql() if source.db_type == "oracle" else "SELECT 1"
+        connection.execute(text(probe))
 
 
 def available_schema_names(source: DataSource) -> list[str]:
     with source_engine(source) as engine:
         if source.db_type == "oracle":
             with engine.connect() as connection:
-                names = [row["name"] for row in connection.execute(text("SELECT username AS name FROM dba_users ORDER BY username")).mappings()]
-            return sorted(set(str(name).upper() for name in names))
+                return OracleCatalogProvider(source).schema_names(connection)
         available = inspect(engine).get_schema_names()
     configured_dataset = (source.options or {}).get("dataset") if source.db_type == "bigquery" else None
     names = [configured_dataset] if configured_dataset else _usable_schema_names(available, source)
@@ -332,6 +319,8 @@ def _query_rows(connection: Connection, query: str, params: dict[str, str]) -> l
 
 
 def _collect_procedures(connection: Connection, source: DataSource, schema_name: str) -> list[dict]:
+    if source.db_type == "oracle":
+        return OracleCatalogProvider(source).procedures(connection, schema_name)
     queries = {
         "postgresql": "SELECT p.proname AS name, pg_get_function_identity_arguments(p.oid) AS arguments, pg_get_function_result(p.oid) AS return_type, pg_get_functiondef(p.oid) AS definition, CASE WHEN p.prokind = 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS routine_type FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = :schema AND p.prokind IN ('f', 'p')",
         "mysql": "SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS routine_type, DTD_IDENTIFIER AS return_type, ROUTINE_DEFINITION AS definition FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = :schema",
@@ -346,6 +335,8 @@ def _collect_procedures(connection: Connection, source: DataSource, schema_name:
 
 
 def _collect_select_permissions(connection: Connection, source: DataSource, schema_name: str) -> dict[str, dict]:
+    if source.db_type == "oracle":
+        return OracleCatalogProvider(source).select_permissions(connection, schema_name)
     if source.db_type == "sqlite":
         return {"*": {"select": True, "privileges": ["SELECT"], "checked_as": source.username or "sqlite"}}
     queries = {
@@ -443,25 +434,13 @@ def _collect_select_permissions(connection: Connection, source: DataSource, sche
 
 def _source_table_names(connection: Connection, inspector, source: DataSource, schema_name: str) -> list[str]:
     if source.db_type == "oracle":
-        rows = connection.execute(text("""
-            SELECT table_name AS name
-            FROM dba_tables
-            WHERE owner = UPPER(:schema)
-            ORDER BY table_name
-        """), {"schema": schema_name}).mappings().all()
-        return [str(row["name"]) for row in rows]
+        return OracleCatalogProvider(source).table_names(connection, schema_name)
     return inspector.get_table_names(schema=schema_name)
 
 
 def _source_view_names(connection: Connection, inspector, source: DataSource, schema_name: str) -> list[str]:
     if source.db_type == "oracle":
-        rows = connection.execute(text("""
-            SELECT view_name AS name
-            FROM dba_views
-            WHERE owner = UPPER(:schema)
-            ORDER BY view_name
-        """), {"schema": schema_name}).mappings().all()
-        return [str(row["name"]) for row in rows]
+        return OracleCatalogProvider(source).view_names(connection, schema_name)
     return inspector.get_view_names(schema=schema_name)
 
 
@@ -477,7 +456,7 @@ def collect_schema(
     with source_engine(source) as engine, engine.connect() as connection:
         inspector = inspect(engine)
         if source.db_type == "oracle":
-            available = [row["name"] for row in connection.execute(text("SELECT username AS name FROM dba_users ORDER BY username")).mappings()]
+            available = OracleCatalogProvider(source).schema_names(connection)
         else:
             available = inspector.get_schema_names()
         configured_dataset = (source.options or {}).get("dataset") if source.db_type == "bigquery" else None
@@ -528,12 +507,13 @@ def collect_schema(
                 phase = "tables"
                 emit(phase, "running", f"{schema_name} 테이블 수집을 시작합니다.", {"schema": schema_name})
                 table_names = _source_table_names(connection, inspector, source, schema_name) if "TABLE" in items else []
+                oracle_columns = OracleCatalogProvider(source).columns_by_schema(connection, schema_name) if source.db_type == "oracle" and table_names else {}
                 diagnostic["steps"].append({"step": phase, "status": "success" if "TABLE" in items else "skipped", "count": len(table_names)})
                 for table_name in table_names:
                     table = {
                         "name": table_name,
                         "comment": (_safe(lambda: inspector.get_table_comment(table_name, schema=schema_name), {}) or {}).get("text"),
-                        "columns": _safe(lambda: _source_columns(connection, inspector, source, schema_name, table_name), []),
+                        "columns": oracle_columns.get(table_name, []) if source.db_type == "oracle" else _safe(lambda: _source_columns(connection, inspector, source, schema_name, table_name), []),
                         "primary_key": _safe(lambda: inspector.get_pk_constraint(table_name, schema=schema_name), {}),
                         "foreign_keys": _safe(lambda: inspector.get_foreign_keys(table_name, schema=schema_name), []),
                         "indexes": _safe(lambda: inspector.get_indexes(table_name, schema=schema_name), []) if "INDEX" in items else [],
