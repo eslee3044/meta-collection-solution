@@ -1,6 +1,8 @@
 import base64
+import binascii
 import hashlib
 import hmac
+
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -65,6 +67,6 @@ def decode_token(token: str) -> int:
         if payload["exp"] < datetime.now(timezone.utc).timestamp():
             raise ValueError
         return int(payload["sub"])
-    except (ValueError, KeyError, json.JSONDecodeError):
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError, binascii.Error, json.JSONDecodeError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="인증이 만료되었거나 유효하지 않습니다.")
 

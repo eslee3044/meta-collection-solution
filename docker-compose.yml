@@ -4,7 +4,7 @@ services:
     environment:
       POSTGRES_DB: metavault
       POSTGRES_USER: metavault
-      POSTGRES_PASSWORD: ${METAVAULT_DB_PASSWORD:-metavault-local}
+      POSTGRES_PASSWORD: "${METAVAULT_DB_PASSWORD:?METAVAULT_DB_PASSWORD must be set}"
     ports:
       - "5432:5432"
     volumes:
@@ -21,10 +21,10 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      METAVAULT_DATABASE_URL: postgresql+psycopg://metavault:${METAVAULT_DB_PASSWORD:-metavault-local}@postgres:5432/metavault
-      METAVAULT_SECRET_KEY: ${METAVAULT_SECRET_KEY:-change-this-before-production}
+      METAVAULT_DATABASE_URL: "postgresql+psycopg://metavault:${METAVAULT_DB_PASSWORD:?METAVAULT_DB_PASSWORD must be set}@postgres:5432/metavault"
+      METAVAULT_SECRET_KEY: "${METAVAULT_SECRET_KEY:?METAVAULT_SECRET_KEY must be set}"
       METAVAULT_ADMIN_EMAIL: ${METAVAULT_ADMIN_EMAIL:-admin@example.com}
-      METAVAULT_ADMIN_PASSWORD: ${METAVAULT_ADMIN_PASSWORD:-Admin123!}
+      METAVAULT_ADMIN_PASSWORD: "${METAVAULT_ADMIN_PASSWORD:?METAVAULT_ADMIN_PASSWORD must be set}"
       METAVAULT_CORS_ORIGINS: http://localhost:8090
       METAVAULT_DEPLOYMENT_MODE: docker
       METAVAULT_COLLECTION_WORKERS: ${METAVAULT_COLLECTION_WORKERS:-8}
