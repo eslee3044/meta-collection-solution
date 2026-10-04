@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -17,6 +17,39 @@ class CollectionCancelled(Exception):
     """Raised when a collection run is cooperatively cancelled."""
 
 
+def claim_run(session, run_id: int) -> bool:
+    now = datetime.now(timezone.utc)
+    result = session.execute(
+        update(CollectionRun)
+        .where(CollectionRun.id == run_id, CollectionRun.status == "queued")
+        .values(status="running", current_step="initializing", started_at=now, heartbeat_at=now)
+    )
+    session.commit()
+    return result.rowcount == 1
+
+
+def recover_orphan_runs(session, stale_before: datetime) -> int:
+    now = datetime.now(timezone.utc)
+    result = session.execute(
+        update(CollectionRun)
+        .where(
+            CollectionRun.status == "running",
+            CollectionRun.heartbeat_at.is_not(None),
+            CollectionRun.heartbeat_at < stale_before,
+        )
+        .values(
+            status="timeout",
+            current_step="worker_lost",
+            finished_at=now,
+            heartbeat_at=now,
+            error_code="WORKER_LOST",
+            error_message="Worker heartbeat가 만료되어 실행을 종료했습니다.",
+        )
+    )
+    session.commit()
+    return result.rowcount
+
+
 def request_run_cancel(session, run_id: int) -> CollectionRun:
     now = datetime.now(timezone.utc)
     result = session.execute(
@@ -24,6 +57,7 @@ def request_run_cancel(session, run_id: int) -> CollectionRun:
         .where(
             CollectionRun.id == run_id,
             CollectionRun.status.in_(["queued", "running"]),
+
         )
         .values(status="cancel_requested", current_step="cancel_requested", cancel_requested_at=now, heartbeat_at=now)
     )
@@ -53,9 +87,12 @@ def execute_job(job_id: int) -> int:
         job = session.get(CollectionJob, job_id)
         if not job:
             raise ValueError("수집 작업을 찾을 수 없습니다.")
-        run = CollectionRun(job_id=job.id, status="running", current_step="initializing", heartbeat_at=datetime.now(timezone.utc))
+        run = CollectionRun(job_id=job.id, status="queued", current_step="queued")
         session.add(run)
         session.commit()
+        if not claim_run(session, run.id):
+            return run.id
+        session.refresh(run)
         sequence = 0
         current_step = "initializing"
 
@@ -192,6 +229,11 @@ def sync_jobs() -> None:
 
 
 def start_scheduler() -> None:
+    with SessionLocal() as session:
+        recover_orphan_runs(
+            session,
+            datetime.now(timezone.utc) - timedelta(minutes=get_settings().worker_stale_minutes),
+        )
     if not scheduler.running:
         scheduler.start()
     sync_jobs()
