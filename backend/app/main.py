@@ -23,7 +23,7 @@ from .integration import ensure_integration_views, snapshot_diff, snapshot_summa
 from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaColumnExt, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
 from .capabilities import assert_supported_db_type
 from .collector import available_schema_names, source_engine, test_source
-from .scheduler import execute_job, request_run_cancel, start_scheduler, stop_scheduler, sync_jobs
+from .scheduler import enqueue_run, execute_job, request_run_cancel, start_scheduler, stop_scheduler, sync_jobs
 from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut
 from .security import create_token, decode_token, decrypt_json, encrypt_json, hash_password, verify_password
 from .seed import seed
@@ -592,8 +592,9 @@ def run_job(job_id: int, tasks: BackgroundTasks, session: Session = Depends(get_
         assert_supported_db_type(job.data_source.db_type)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    tasks.add_task(execute_job, job_id)
-    return {"status": "accepted"}
+    run = enqueue_run(session, job_id)
+    tasks.add_task(execute_job, job_id, run.id)
+    return {"status": "accepted", "run_id": run.id}
 
 
 @app.delete("/api/jobs/{job_id}", status_code=204)

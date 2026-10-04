@@ -17,6 +17,16 @@ class CollectionCancelled(Exception):
     """Raised when a collection run is cooperatively cancelled."""
 
 
+def enqueue_run(session, job_id: int) -> CollectionRun:
+    if not session.get(CollectionJob, job_id):
+        raise ValueError("수집 작업을 찾을 수 없습니다.")
+    run = CollectionRun(job_id=job_id, status="queued", current_step="queued")
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    return run
+
+
 def claim_run(session, run_id: int) -> bool:
     now = datetime.now(timezone.utc)
     result = session.execute(
@@ -82,14 +92,17 @@ scheduler = BackgroundScheduler(
 )
 
 
-def execute_job(job_id: int) -> int:
+def execute_job(job_id: int, run_id: int | None = None) -> int:
     with SessionLocal() as session:
         job = session.get(CollectionJob, job_id)
         if not job:
             raise ValueError("수집 작업을 찾을 수 없습니다.")
-        run = CollectionRun(job_id=job.id, status="queued", current_step="queued")
-        session.add(run)
-        session.commit()
+        if run_id is None:
+            run = enqueue_run(session, job.id)
+        else:
+            run = session.get(CollectionRun, run_id)
+            if not run or run.job_id != job.id:
+                raise ValueError("수집 실행 기록을 찾을 수 없습니다.")
         if not claim_run(session, run.id):
             return run.id
         session.refresh(run)

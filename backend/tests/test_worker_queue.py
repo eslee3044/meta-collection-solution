@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.database import Base
 from app.models import CollectionJob, CollectionRun, DataSource
-from app.scheduler import claim_run, recover_orphan_runs
+from app.scheduler import claim_run, enqueue_run, recover_orphan_runs
 
 
 def make_session():
@@ -15,6 +15,20 @@ def make_session():
         tables=[table for table in Base.metadata.sorted_tables if table.schema != "EAPET"],
     )
     return engine, Session(engine)
+
+
+def test_enqueue_run_persists_queued_work_before_worker_claims_it():
+    engine, session = make_session()
+    source = DataSource(name="source", db_type="sqlite")
+    job = CollectionJob(name="job", data_source=source, schemas=[])
+    session.add(job)
+    session.commit()
+
+    run = enqueue_run(session, job.id)
+
+    assert run.status == "queued"
+    assert run.current_step == "queued"
+    assert run.job_id == job.id
 
 
 def test_claim_run_is_atomic_and_only_first_worker_wins():
