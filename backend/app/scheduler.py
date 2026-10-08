@@ -245,6 +245,11 @@ def apply_storage_growth(payload: dict, previous_payload: dict | None) -> None:
     payload["storage_summary"] = summary
 
 
+def enqueue_scheduled_job(job_id: int) -> int:
+    with SessionLocal() as session:
+        return enqueue_run(session, job_id).id
+
+
 def sync_jobs() -> None:
     scheduler.remove_all_jobs()
     with SessionLocal() as session:
@@ -259,7 +264,7 @@ def sync_jobs() -> None:
                 trigger = IntervalTrigger(minutes=job.interval_minutes)
             else:
                 continue
-            item = scheduler.add_job(execute_job, trigger, args=[job.id], id=f"collection:{job.id}", replace_existing=True, max_instances=1)
+            item = scheduler.add_job(enqueue_scheduled_job, trigger, args=[job.id], id=f"collection:{job.id}", replace_existing=True, max_instances=1)
             job.next_run_at = item.next_run_time
         session.commit()
 
@@ -273,8 +278,6 @@ def start_scheduler() -> None:
     if not scheduler.running:
         scheduler.start()
     sync_jobs()
-    with SessionLocal() as session:
-        dispatch_queued_runs(session, _submit_queued_run)
 
 
 def stop_scheduler() -> None:

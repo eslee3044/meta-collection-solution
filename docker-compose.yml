@@ -37,6 +37,25 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+  worker:
+    platform: linux/amd64
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      METAVAULT_DATABASE_URL: "postgresql+psycopg://metavault:${METAVAULT_DB_PASSWORD:?METAVAULT_DB_PASSWORD must be set}@postgres:5432/metavault"
+      METAVAULT_SECRET_KEY: "${METAVAULT_SECRET_KEY:?METAVAULT_SECRET_KEY must be set}"
+      METAVAULT_ADMIN_EMAIL: ${METAVAULT_ADMIN_EMAIL:-admin@example.com}
+      METAVAULT_ADMIN_PASSWORD: "${METAVAULT_ADMIN_PASSWORD:?METAVAULT_ADMIN_PASSWORD must be set}"
+      METAVAULT_CORS_ORIGINS: http://localhost:8090
+      METAVAULT_DEPLOYMENT_MODE: docker
+      METAVAULT_COLLECTION_WORKERS: ${METAVAULT_COLLECTION_WORKERS:-8}
+      METAVAULT_WORKER_STALE_MINUTES: ${METAVAULT_WORKER_STALE_MINUTES:-15}
+      METAVAULT_WORKER_POLL_SECONDS: ${METAVAULT_WORKER_POLL_SECONDS:-5}
+    volumes:
+      - ./sample:/app/sample:ro
   web:
     build: ./frontend
     depends_on:

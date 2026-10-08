@@ -8,7 +8,7 @@ from urllib.parse import quote
 from typing import Any
 
 import yaml
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy import MetaData, Table, and_, delete, desc, func, inspect, or_, select, text, update
@@ -23,7 +23,7 @@ from .integration import ensure_integration_views, snapshot_diff, snapshot_summa
 from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaColumnExt, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
 from .capabilities import assert_supported_db_type
 from .collector import available_schema_names, source_engine, test_source
-from .scheduler import enqueue_run, execute_job, request_run_cancel, start_scheduler, stop_scheduler, sync_jobs
+from .scheduler import enqueue_run, request_run_cancel, start_scheduler, stop_scheduler, sync_jobs
 from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut
 from .security import create_token, decode_token, decrypt_json, encrypt_json, hash_password, verify_password
 from .seed import seed
@@ -584,7 +584,7 @@ def update_job(job_id: int, payload: JobIn, session: Session = Depends(get_sessi
 
 
 @app.post("/api/jobs/{job_id}/run", status_code=202)
-def run_job(job_id: int, tasks: BackgroundTasks, session: Session = Depends(get_session), _: User = Depends(require("jobs:write"))):
+def run_job(job_id: int, session: Session = Depends(get_session), _: User = Depends(require("jobs:write"))):
     job = session.get(CollectionJob, job_id)
     if not job:
         raise HTTPException(404, "수집 작업을 찾을 수 없습니다.")
@@ -593,7 +593,6 @@ def run_job(job_id: int, tasks: BackgroundTasks, session: Session = Depends(get_
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     run = enqueue_run(session, job_id)
-    tasks.add_task(execute_job, job_id, run.id)
     return {"status": "accepted", "run_id": run.id}
 
 

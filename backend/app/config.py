@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     token_minutes: int = 480
     collection_workers: int = 8
     worker_stale_minutes: int = 15
+    worker_poll_seconds: int = 5
     integration_api_key: str = ""
 
     model_config = SettingsConfigDict(
