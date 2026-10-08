@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.database import Base
 from app.models import CollectionJob, CollectionRun, DataSource
-from app.scheduler import claim_run, enqueue_run, recover_orphan_runs
+from app.scheduler import claim_run, dispatch_queued_runs, enqueue_run, recover_orphan_runs
 
 
 def make_session():
@@ -46,6 +46,22 @@ def test_claim_run_is_atomic_and_only_first_worker_wins():
     assert run.status == "running"
     assert run.current_step == "initializing"
     assert run.heartbeat_at is not None
+
+
+def test_dispatch_queued_runs_submits_only_queued_runs():
+    engine, session = make_session()
+    source = DataSource(name="source", db_type="sqlite")
+    job = CollectionJob(name="job", data_source=source, schemas=[])
+    queued = CollectionRun(job=job, status="queued", current_step="queued")
+    running = CollectionRun(job=job, status="running", current_step="initializing")
+    session.add_all([queued, running])
+    session.commit()
+    submitted = []
+
+    count = dispatch_queued_runs(session, lambda job_id, run_id: submitted.append((job_id, run_id)))
+
+    assert count == 1
+    assert submitted == [(job.id, queued.id)]
 
 
 def test_recover_orphan_runs_marks_only_stale_running_runs():

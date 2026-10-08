@@ -4,6 +4,7 @@ import json
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.date import DateTrigger
 from sqlalchemy import desc, select, update
 
 from .capabilities import is_supported_db_type
@@ -36,6 +37,17 @@ def claim_run(session, run_id: int) -> bool:
     )
     session.commit()
     return result.rowcount == 1
+
+
+def dispatch_queued_runs(session, submit) -> int:
+    queued_runs = session.scalars(
+        select(CollectionRun)
+        .where(CollectionRun.status == "queued")
+        .order_by(CollectionRun.id)
+    ).all()
+    for run in queued_runs:
+        submit(run.job_id, run.id)
+    return len(queued_runs)
 
 
 def recover_orphan_runs(session, stale_before: datetime) -> int:
@@ -90,6 +102,17 @@ scheduler = BackgroundScheduler(
     executors={"default": {"type": "threadpool", "max_workers": get_settings().collection_workers}},
     job_defaults={"coalesce": False, "max_instances": 1},
 )
+
+
+def _submit_queued_run(job_id: int, run_id: int) -> None:
+    scheduler.add_job(
+        execute_job,
+        DateTrigger(run_date=datetime.now(timezone.utc)),
+        args=[job_id, run_id],
+        id=f"run:{run_id}",
+        replace_existing=True,
+        max_instances=1,
+    )
 
 
 def execute_job(job_id: int, run_id: int | None = None) -> int:
@@ -250,6 +273,8 @@ def start_scheduler() -> None:
     if not scheduler.running:
         scheduler.start()
     sync_jobs()
+    with SessionLocal() as session:
+        dispatch_queued_runs(session, _submit_queued_run)
 
 
 def stop_scheduler() -> None:
