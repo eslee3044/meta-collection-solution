@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -9,10 +9,14 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import SessionLocal
 from .models import CollectionRun
-from .scheduler import execute_job
+from .scheduler import execute_job, recover_orphan_runs
 
 
 def worker_once(session: Session, executor=execute_job) -> int:
+    recover_orphan_runs(
+        session,
+        datetime.now(timezone.utc) - timedelta(minutes=get_settings().worker_stale_minutes),
+    )
     runs = session.scalars(
         select(CollectionRun)
         .where(

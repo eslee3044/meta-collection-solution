@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import re
@@ -131,6 +131,41 @@ app.add_middleware(
 @app.get("/api/health")
 def health():
     return {"status": "ok", "service": settings.app_name}
+
+
+@app.get("/api/worker/status")
+def worker_status(session: Session = Depends(get_session), _: User = Depends(require("jobs:read"))):
+    now = datetime.now(timezone.utc)
+    stale_before = now - timedelta(minutes=settings.worker_stale_minutes)
+    counts = {
+        status: count
+        for status, count in session.execute(
+            select(CollectionRun.status, func.count(CollectionRun.id)).group_by(CollectionRun.status)
+        ).all()
+    }
+    stalled = session.scalar(
+        select(func.count(CollectionRun.id)).where(
+            CollectionRun.status == "running",
+            CollectionRun.heartbeat_at.is_not(None),
+            CollectionRun.heartbeat_at < stale_before,
+        )
+    ) or 0
+    return {
+        "queued": counts.get("queued", 0),
+        "running": counts.get("running", 0),
+        "retry_wait": session.scalar(
+            select(func.count(CollectionRun.id)).where(
+                CollectionRun.status == "queued",
+                CollectionRun.next_attempt_at.is_not(None),
+                CollectionRun.next_attempt_at > now,
+            )
+        ) or 0,
+        "failed": counts.get("failed", 0),
+        "timeout": counts.get("timeout", 0),
+        "stalled": stalled,
+        "stale_minutes": settings.worker_stale_minutes,
+        "poll_seconds": settings.worker_poll_seconds,
+    }
 
 
 @app.get("/api/capabilities")

@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from app.database import Base
 from app.models import CollectionJob, CollectionRun, DataSource
 from app.worker import worker_once
@@ -27,3 +29,23 @@ def test_worker_once_dispatches_queued_runs_to_executor():
 
     assert count == 1
     assert calls == [(job.id, run.id)]
+
+
+def test_worker_once_recovers_stalled_running_runs():
+    _, session = make_session()
+    source = DataSource(name="source", db_type="sqlite")
+    job = CollectionJob(name="job", data_source=source, schemas=[])
+    run = CollectionRun(
+        job=job,
+        status="running",
+        current_step="collect_schema",
+        heartbeat_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    session.add(run)
+    session.commit()
+
+    worker_once(session, lambda *_: None)
+
+    session.refresh(run)
+    assert run.status == "timeout"
+    assert run.error_code == "WORKER_LOST"
