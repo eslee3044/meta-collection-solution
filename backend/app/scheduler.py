@@ -18,6 +18,35 @@ class CollectionCancelled(Exception):
     """Raised when a collection run is cooperatively cancelled."""
 
 
+def is_retryable_error(error: Exception) -> bool:
+    message = str(error).lower()
+    permanent_markers = ("permission denied", "not authorized", "unsupported", "invalid sql")
+    transient_markers = ("timeout", "connection", "temporarily", "connection reset", "unavailable")
+    return not any(marker in message for marker in permanent_markers) and (
+        isinstance(error, (ConnectionError, TimeoutError)) or any(marker in message for marker in transient_markers)
+    )
+
+
+def calculate_retry_delay(attempt_count: int, base_seconds: int) -> int:
+    return base_seconds * (2 ** max(0, attempt_count - 1))
+
+
+def schedule_retry(session, run: CollectionRun, error: Exception, now: datetime | None = None) -> bool:
+    now = now or datetime.now(timezone.utc)
+    if run.attempt_count >= run.max_attempts or not is_retryable_error(error):
+        return False
+    delay = calculate_retry_delay(run.attempt_count, get_settings().retry_base_seconds)
+    run.status = "queued"
+    run.current_step = "retry_wait"
+    run.error_code = "RETRY_SCHEDULED"
+    run.error_message = str(error)[:4000]
+    run.next_attempt_at = now + timedelta(seconds=delay)
+    run.finished_at = None
+    run.heartbeat_at = now
+    session.commit()
+    return True
+
+
 def enqueue_run(session, job_id: int) -> CollectionRun:
     if not session.get(CollectionJob, job_id):
         raise ValueError("수집 작업을 찾을 수 없습니다.")
@@ -32,8 +61,19 @@ def claim_run(session, run_id: int) -> bool:
     now = datetime.now(timezone.utc)
     result = session.execute(
         update(CollectionRun)
-        .where(CollectionRun.id == run_id, CollectionRun.status == "queued")
-        .values(status="running", current_step="initializing", started_at=now, heartbeat_at=now)
+        .where(
+            CollectionRun.id == run_id,
+            CollectionRun.status == "queued",
+            (CollectionRun.next_attempt_at.is_(None) | (CollectionRun.next_attempt_at <= now)),
+        )
+        .values(
+            status="running",
+            current_step="initializing",
+            started_at=now,
+            heartbeat_at=now,
+            next_attempt_at=None,
+            attempt_count=CollectionRun.attempt_count + 1,
+        )
     )
     session.commit()
     return result.rowcount == 1
@@ -206,12 +246,14 @@ def execute_job(job_id: int, run_id: int | None = None) -> int:
             run.error_message = str(exc)[:4000]
             log("warning", "cancelled", "사용자 요청으로 수집을 취소했습니다.", str(exc), check_cancel=False)
         except Exception as exc:
-            run.status, run.error_message = "failed", str(exc)[:4000]
-            run.error_code = "COLLECTION_FAILED"
-            log("error", current_step, f"수집 중 오류가 발생했습니다: {current_step}", str(exc), check_cancel=False)
+            if not schedule_retry(session, run, exc):
+                run.status, run.error_message = "failed", str(exc)[:4000]
+                run.error_code = "COLLECTION_FAILED"
+                log("error", current_step, f"수집 중 오류가 발생했습니다: {current_step}", str(exc), check_cancel=False)
         finally:
-            run.finished_at = datetime.now(timezone.utc)
-            run.heartbeat_at = run.finished_at
+            if run.status != "queued":
+                run.finished_at = datetime.now(timezone.utc)
+                run.heartbeat_at = run.finished_at
             session.commit()
         return run.id
 

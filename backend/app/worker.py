@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -14,7 +15,10 @@ from .scheduler import execute_job
 def worker_once(session: Session, executor=execute_job) -> int:
     runs = session.scalars(
         select(CollectionRun)
-        .where(CollectionRun.status == "queued")
+        .where(
+            CollectionRun.status == "queued",
+            (CollectionRun.next_attempt_at.is_(None) | (CollectionRun.next_attempt_at <= datetime.now(timezone.utc))),
+        )
         .order_by(CollectionRun.id)
         .limit(get_settings().collection_workers)
     ).all()

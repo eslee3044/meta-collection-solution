@@ -83,6 +83,9 @@ async def lifespan(_: FastAPI):
         "cancel_requested_at": "TIMESTAMP WITH TIME ZONE",
         "cancelled_at": "TIMESTAMP WITH TIME ZONE",
         "error_code": "VARCHAR(80)",
+        "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+        "max_attempts": "INTEGER NOT NULL DEFAULT 3",
+        "next_attempt_at": "TIMESTAMP WITH TIME ZONE",
     }
     run_columns = {column["name"] for column in inspect(engine).get_columns("collection_runs")}
     for name, definition in lifecycle_columns.items():
@@ -619,6 +622,25 @@ def cancel_run(run_id: int, session: Session = Depends(get_session), _: User = D
         message = str(exc)
         status_code = 404 if "찾을 수 없습니다" in message else 409
         raise HTTPException(status_code, message) from exc
+
+
+@app.post("/api/runs/{run_id}/retry", response_model=RunOut, status_code=202)
+def retry_run(run_id: int, session: Session = Depends(get_session), _: User = Depends(require("jobs:write"))):
+    original = session.get(CollectionRun, run_id)
+    if not original:
+        raise HTTPException(404, "수집 실행 기록을 찾을 수 없습니다.")
+    if original.status not in {"failed", "timeout"}:
+        raise HTTPException(409, "실패 또는 timeout 상태의 실행만 재시도할 수 있습니다.")
+    retry = CollectionRun(
+        job_id=original.job_id,
+        status="queued",
+        current_step="queued",
+        max_attempts=original.max_attempts,
+    )
+    session.add(retry)
+    session.commit()
+    session.refresh(retry)
+    return retry
 
 
 @app.get("/api/runs/{run_id}/logs", response_model=list[RunLogOut])

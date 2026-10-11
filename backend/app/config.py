@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     collection_workers: int = 8
     worker_stale_minutes: int = 15
     worker_poll_seconds: int = 5
+    retry_base_seconds: int = 10
     integration_api_key: str = ""
 
     model_config = SettingsConfigDict(

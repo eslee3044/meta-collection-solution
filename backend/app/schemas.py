@@ -114,6 +114,9 @@ class RunOut(BaseModel):
     cancel_requested_at: datetime | None
     cancelled_at: datetime | None
     error_code: str | None
+    attempt_count: int
+    max_attempts: int
+    next_attempt_at: datetime | None
     started_at: datetime
     finished_at: datetime | None
     object_count: int
