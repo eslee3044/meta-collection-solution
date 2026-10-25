@@ -223,7 +223,11 @@ def apply_source(item: DataSource, payload: DataSourceIn) -> None:
     for field in ["name", "db_type", "host", "port", "database", "username", "options", "ssh_enabled", "ssh_host", "ssh_port", "ssh_username", "ssh_auth_type"]:
         setattr(item, field, getattr(payload, field))
     item.options = {**(payload.options or {}), "ssl_enabled": payload.ssl_enabled}
-    secret = decrypt_json(item.secret_encrypted) if item.secret_encrypted else {}
+    # A newly entered password is sufficient to replace an unreadable legacy
+    # ciphertext (for example after a secret-key rotation).  Do not require
+    # decrypting the old secret before accepting the replacement.  When the
+    # password is omitted, preserve the existing encrypted secret as before.
+    secret = {} if payload.password else (decrypt_json(item.secret_encrypted) if item.secret_encrypted else {})
     if payload.password is not None:
         secret["password"] = payload.password
     if payload.service_account_json is not None:
