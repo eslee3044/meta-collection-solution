@@ -19,10 +19,10 @@ from .capabilities import assert_supported_db_type
 from .catalog import OracleCatalogProvider
 
 
-DEFAULT_PORTS = {"postgresql": 5432, "mysql": 3306, "mariadb": 3306, "mssql": 1433, "oracle": 1521, "db2": 50000}
+DEFAULT_PORTS = {"postgresql": 5432, "mysql": 3306, "mariadb": 3306, "mssql": 1433, "oracle": 1521, "db2": 50000, "vertica": 5433}
 DEFAULT_COLLECTION_ITEMS = ("INDEX", "TABLE", "VIEW", "PROCEDURE", "SELECT PRIVILEGE")
 ALL_COLLECTION_ITEMS = ("INDEX", "TABLE", "VIEW", "PROCEDURE", "SELECT PRIVILEGE", "TRIGGER", "TABLE PARTITION", "INDEX PARTITION", "TABLE SUBPARTITION", "INDEX SUBPARTITION", "MVIEW", "SEQUENCE", "DATABASE LINK", "SYNONYM")
-SYSTEM_SCHEMAS = {"information_schema", "performance_schema", "mysql", "sys", "pg_catalog"}
+SYSTEM_SCHEMAS = {"information_schema", "performance_schema", "mysql", "sys", "pg_catalog", "v_catalog", "v_monitor", "v_internal", "v_txtindex"}
 
 
 def _usable_schema_names(available: list[str], source: DataSource) -> list[str]:
@@ -99,6 +99,7 @@ def _url(source: DataSource, host: str, port: int | None) -> str:
         "mssql": "mssql+pyodbc",
         "oracle": "oracle+oracledb",
         "db2": "db2+ibm_db",
+        "vertica": "vertica+vertica_python",
     }
     if source.db_type == "mssql":
         driver = quote_plus(source.options.get("driver", "ODBC Driver 18 for SQL Server"))
@@ -293,6 +294,16 @@ def _storage_metrics(connection: Connection, source: DataSource, schema_name: st
             LEFT JOIN SYSCAT.TABLESPACES s ON s.TBSPACE = t.TBSPACE
             WHERE t.TABSCHEMA = :schema AND t.TYPE = 'T'
         """,
+        "vertica": """
+            SELECT anchor_table_name AS table_name,
+                   COALESCE(SUM(used_bytes), 0) AS data_bytes,
+                   0 AS index_bytes,
+                   COALESCE(SUM(used_bytes), 0) AS total_bytes,
+                   NULL AS row_estimate
+            FROM v_monitor.projection_storage
+            WHERE anchor_schema_name = :schema
+            GROUP BY anchor_table_name
+        """,
     }
     query = queries[source.db_type]
     rows = connection.execute(text(query), {"schema": schema_name}).mappings()
@@ -328,6 +339,7 @@ def _collect_procedures(connection: Connection, source: DataSource, schema_name:
         "mssql": "SELECT o.name, o.type_desc AS routine_type, OBJECT_DEFINITION(o.object_id) AS definition FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE s.name = :schema AND o.type IN ('P', 'PC', 'FN', 'IF', 'TF')",
         "oracle": "SELECT p.object_name AS name, p.object_type AS routine_type, LISTAGG(s.text, CHR(10)) WITHIN GROUP (ORDER BY s.line) AS definition FROM dba_procedures p LEFT JOIN dba_source s ON s.owner = p.owner AND s.name = p.object_name AND s.type = CASE WHEN p.object_type = 'PACKAGE' THEN 'PACKAGE BODY' ELSE p.object_type END WHERE p.owner = :schema AND p.object_type IN ('PROCEDURE', 'FUNCTION', 'PACKAGE') GROUP BY p.object_name, p.object_type",
         "db2": "SELECT ROUTINENAME AS name, ROUTINETYPE AS routine_type, TEXT AS definition FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = :schema",
+        "vertica": "SELECT procedure_name AS name, 'PROCEDURE' AS routine_type, procedure_definition AS definition FROM v_catalog.procedures WHERE procedure_schema = :schema",
     }
     if source.db_type in {"sqlite", "bigquery"}:
         return []
@@ -427,6 +439,7 @@ def _collect_select_permissions(connection: Connection, source: DataSource, sche
         "mssql": "SELECT o.name FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE s.name = :schema AND o.type IN ('U', 'V') AND HAS_PERMS_BY_NAME(QUOTENAME(s.name) + '.' + QUOTENAME(o.name), 'OBJECT', 'SELECT') = 1",
         "oracle": "SELECT table_name AS name FROM dba_tab_privs WHERE owner = :schema AND privilege = 'SELECT' AND (grantee = USER OR grantee = 'PUBLIC') UNION SELECT table_name AS name FROM dba_tables WHERE owner = :schema AND owner = USER UNION SELECT view_name AS name FROM dba_views WHERE owner = :schema AND owner = USER",
         "db2": "SELECT TABNAME AS name FROM SYSCAT.TABAUTH WHERE TABSCHEMA = :schema AND SELECTAUTH IN ('Y', 'G', 'A') AND (GRANTEE = CURRENT USER OR GRANTEETYPE = 'P')",
+        "vertica": "SELECT object_name AS name FROM v_catalog.grants WHERE object_schema = :schema AND object_type IN ('TABLE', 'VIEW') AND privilege = 'SELECT' AND (grantee = CURRENT_USER OR grantee = 'PUBLIC')",
     }
     rows = _query_rows(connection, queries[source.db_type], {"schema": schema_name})
     return {row["name"]: {"select": True, "privileges": ["SELECT"], "checked_as": source.username or "current_user"} for row in rows}
@@ -461,6 +474,8 @@ def collect_schema(
             available = inspector.get_schema_names()
         configured_dataset = (source.options or {}).get("dataset") if source.db_type == "bigquery" else None
         schemas = selected_schemas or ([configured_dataset] if configured_dataset else _usable_schema_names(available, source))
+        if source.db_type == "vertica":
+            schemas = [schema for schema in schemas if schema and schema.lower() not in SYSTEM_SCHEMAS]
         if source.db_type == "oracle":
             schemas = [schema.upper() for schema in schemas]
         result = {

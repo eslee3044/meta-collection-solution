@@ -1,7 +1,7 @@
 from .config import get_settings
 
 
-ALL_DB_TYPES = ("postgresql", "mysql", "mariadb", "mssql", "oracle", "sqlite", "db2", "bigquery")
+ALL_DB_TYPES = ("postgresql", "mysql", "mariadb", "mssql", "oracle", "sqlite", "db2", "bigquery", "vertica")
 DOCKER_EXCLUDED_DB_TYPES: tuple[str, ...] = ()
 
 

@@ -33,7 +33,7 @@ class LoginResponse(BaseModel):
 
 class DataSourceIn(BaseModel):
     name: str = Field(min_length=2, max_length=120)
-    db_type: Literal["postgresql", "mysql", "mariadb", "mssql", "oracle", "sqlite", "db2", "bigquery"]
+    db_type: Literal["postgresql", "mysql", "mariadb", "mssql", "oracle", "sqlite", "db2", "bigquery", "vertica"]
     host: str = "localhost"
     port: int | None = None
     database: str = ""

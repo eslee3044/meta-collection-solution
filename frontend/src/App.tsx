@@ -19,8 +19,8 @@ const nav: { id: Page; label: string; icon: typeof Gauge; group: string }[] = [
   { id: 'roles', label: '역할 및 권한', icon: ShieldCheck, group: 'ADMINISTRATION' },
 ]
 
-const dbNames: Record<string, string> = { postgresql: 'PostgreSQL', mysql: 'MySQL', mariadb: 'MariaDB', mssql: 'SQL Server', oracle: 'Oracle', sqlite: 'SQLite' }
-const dbPorts: Record<string, number> = { postgresql: 5432, mysql: 3306, mariadb: 3306, mssql: 1433, oracle: 1521 }
+const dbNames: Record<string, string> = { postgresql: 'PostgreSQL', mysql: 'MySQL', mariadb: 'MariaDB', mssql: 'SQL Server', oracle: 'Oracle', sqlite: 'SQLite', db2: 'DB2', bigquery: 'BigQuery', vertica: 'Vertica' }
+const dbPorts: Record<string, number> = { postgresql: 5432, mysql: 3306, mariadb: 3306, mssql: 1433, oracle: 1521, db2: 50000, vertica: 5433 }
 const fmtBytes = (value?: number | null) => {
   if (value == null) return '—'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -148,7 +148,7 @@ function ImportGuide({ onClose }: { onClose: () => void }) {
     }
   ]
 }`
-  return <Modal title="DB 접속 Import 가이드" subtitle="YAML 또는 JSON으로 여러 연결을 한 번에 등록합니다." onClose={onClose} wide><div className="guide-content"><h4>지원 형식</h4><p><code>connections</code> 배열을 최상위에 두고 각 DB 접속 정보를 입력합니다. 파일 확장자는 <code>.yaml</code>, <code>.yml</code>, <code>.json</code>을 사용하세요.</p><h4>주요 필드</h4><ul><li><b>name</b>, <b>db_type</b>은 필수입니다.</li><li><b>db_type</b>: postgresql, mysql, mariadb, mssql, oracle, sqlite, db2, bigquery</li><li>비밀번호·인증서·개인키는 <code>${'{'}환경변수명{'}'}</code>으로 작성할 수 있습니다.</li><li>SSH 설정은 <code>ssh.enabled</code>, <code>ssh.host</code>, <code>ssh.port</code> 형식으로 작성합니다.</li><li>Import 미리보기에는 비밀번호와 키가 표시되지 않습니다.</li></ul><h4>YAML 예시</h4><pre className="guide-code">{yamlExample}</pre><h4>JSON 예시</h4><pre className="guide-code">{jsonExample}</pre></div></Modal>
+  return <Modal title="DB 접속 Import 가이드" subtitle="YAML 또는 JSON으로 여러 연결을 한 번에 등록합니다." onClose={onClose} wide><div className="guide-content"><h4>지원 형식</h4><p><code>connections</code> 배열을 최상위에 두고 각 DB 접속 정보를 입력합니다. 파일 확장자는 <code>.yaml</code>, <code>.yml</code>, <code>.json</code>을 사용하세요.</p><h4>주요 필드</h4><ul><li><b>name</b>, <b>db_type</b>은 필수입니다.</li><li><b>db_type</b>: postgresql, mysql, mariadb, mssql, oracle, sqlite, db2, bigquery, vertica</li><li>비밀번호·인증서·개인키는 <code>${'{'}환경변수명{'}'}</code>으로 작성할 수 있습니다.</li><li>SSH 설정은 <code>ssh.enabled</code>, <code>ssh.host</code>, <code>ssh.port</code> 형식으로 작성합니다.</li><li>Import 미리보기에는 비밀번호와 키가 표시되지 않습니다.</li></ul><h4>YAML 예시</h4><pre className="guide-code">{yamlExample}</pre><h4>JSON 예시</h4><pre className="guide-code">{jsonExample}</pre></div></Modal>
 }
 
 function SourceImportDialog({ onClose, onDone }: { onClose: () => void; onDone: (message: string) => void }) {
