@@ -439,7 +439,24 @@ def _collect_select_permissions(connection: Connection, source: DataSource, sche
         "mssql": "SELECT o.name FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE s.name = :schema AND o.type IN ('U', 'V') AND HAS_PERMS_BY_NAME(QUOTENAME(s.name) + '.' + QUOTENAME(o.name), 'OBJECT', 'SELECT') = 1",
         "oracle": "SELECT table_name AS name FROM dba_tab_privs WHERE owner = :schema AND privilege = 'SELECT' AND (grantee = USER OR grantee = 'PUBLIC') UNION SELECT table_name AS name FROM dba_tables WHERE owner = :schema AND owner = USER UNION SELECT view_name AS name FROM dba_views WHERE owner = :schema AND owner = USER",
         "db2": "SELECT TABNAME AS name FROM SYSCAT.TABAUTH WHERE TABSCHEMA = :schema AND SELECTAUTH IN ('Y', 'G', 'A') AND (GRANTEE = CURRENT USER OR GRANTEETYPE = 'P')",
-        "vertica": "SELECT object_name AS name FROM v_catalog.grants WHERE object_schema = :schema AND object_type IN ('TABLE', 'VIEW') AND privilege = 'SELECT' AND (grantee = CURRENT_USER OR grantee = 'PUBLIC')",
+        "vertica": """
+            SELECT object_name AS name
+            FROM v_catalog.grants
+            WHERE object_schema = :schema
+              AND object_type IN ('TABLE', 'VIEW')
+              AND privilege = 'SELECT'
+              AND (grantee = CURRENT_USER OR grantee = 'PUBLIC')
+            UNION
+            SELECT table_name AS name
+            FROM v_catalog.tables
+            WHERE table_schema = :schema
+              AND owner_name = CURRENT_USER
+            UNION
+            SELECT table_name AS name
+            FROM v_catalog.views
+            WHERE table_schema = :schema
+              AND owner_name = CURRENT_USER
+        """,
     }
     rows = _query_rows(connection, queries[source.db_type], {"schema": schema_name})
     return {row["name"]: {"select": True, "privileges": ["SELECT"], "checked_as": source.username or "current_user"} for row in rows}
