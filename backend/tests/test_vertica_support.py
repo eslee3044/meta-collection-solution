@@ -72,6 +72,8 @@ def test_vertica_select_permissions_query_uses_object_name():
     permissions = _collect_select_permissions(Connection(), source, "PUBLIC")
 
     assert "object_name AS name" in captured["query"]
+    assert "WITH RECURSIVE" in captured["query"]
+    assert "object_type = 'ROLE'" in captured["query"]
     assert permissions["FACT_SALES"]["select"] is True
 
 

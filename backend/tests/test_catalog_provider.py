@@ -1,4 +1,6 @@
 from app.catalog.oracle import OracleCatalogProvider
+from app.catalog.registry import get_catalog_provider
+from app.collector import _collect_select_permissions
 from app.models import DataSource
 
 
@@ -39,6 +41,26 @@ def test_oracle_provider_exposes_probe_and_schema_contract():
     assert provider.stage_names() == ["procedures", "permissions", "tables", "views"]
 
 
+def test_catalog_registry_keeps_inspector_fallback_and_oracle_provider():
+    class Inspector:
+        def get_schema_names(self):
+            return ["public"]
+
+        def get_table_names(self, schema):
+            return ["records"]
+
+        def get_view_names(self, schema):
+            return ["record_view"]
+
+    generic = get_catalog_provider(DataSource(name="pg", db_type="postgresql", database="db"), Inspector())
+    assert generic.schema_names(None) == ["public"]
+    assert generic.table_names(None, "public") == ["records"]
+    assert generic.view_names(None, "public") == ["record_view"]
+
+    oracle = get_catalog_provider(oracle_source(), Inspector())
+    assert oracle.custom.__class__ is OracleCatalogProvider
+
+
 def test_oracle_provider_collects_catalog_layers():
     provider = OracleCatalogProvider(oracle_source())
     connection = FakeConnection(
@@ -66,3 +88,58 @@ def test_oracle_provider_collects_catalog_layers():
     assert "dba_tab_columns" in queries
     assert "dba_source" in queries
     assert "dba_tab_privs" in queries
+    assert "session_roles" in queries
+
+
+def test_mysql_permissions_include_enabled_role_grants():
+    captured = {}
+
+    class Connection:
+        def execute(self, statement, params):
+            captured.setdefault("queries", []).append(str(statement))
+
+            class Result:
+                def mappings(self):
+                    return [{"name": "CUSTOMERS"}]
+
+            return Result()
+
+    source = DataSource(name="mysql", db_type="mysql", database="app", username="reader")
+    permissions = _collect_select_permissions(Connection(), source, "app")
+
+    assert any("role_table_grants" in query.lower() for query in captured["queries"])
+    assert permissions["CUSTOMERS"]["select"] is True
+
+
+def test_mysql_permissions_keep_direct_grants_when_role_catalog_is_unavailable():
+    from sqlalchemy.exc import SQLAlchemyError
+
+    captured = []
+
+    class Connection:
+        def execute(self, statement, params):
+            query = str(statement)
+            captured.append(query)
+            if "ROLE_TABLE_GRANTS" in query:
+                raise SQLAlchemyError("ROLE_TABLE_GRANTS is unavailable")
+
+            class Result:
+                def mappings(self):
+                    return [{"name": "CUSTOMERS"}]
+
+            return Result()
+
+    source = DataSource(name="mysql", db_type="mysql", database="app", username="reader")
+    permissions = _collect_select_permissions(Connection(), source, "app")
+
+    assert len(captured) == 2
+    assert permissions["CUSTOMERS"]["select"] is True
+
+
+def test_bigquery_permissions_are_explicitly_unsupported_not_a_key_error():
+    class Connection:
+        def execute(self, statement, params):
+            raise AssertionError("BigQuery table permission query should not execute")
+
+    source = DataSource(name="bigquery", db_type="bigquery", database="project", username="reader")
+    assert _collect_select_permissions(Connection(), source, "dataset") == {}

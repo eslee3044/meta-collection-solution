@@ -143,7 +143,13 @@ class OracleCatalogProvider:
             """
             SELECT table_name AS name
             FROM dba_tab_privs
-            WHERE owner = UPPER(:schema) AND privilege = 'SELECT' AND (grantee = USER OR grantee = 'PUBLIC')
+            WHERE owner = UPPER(:schema)
+              AND privilege = 'SELECT'
+              AND (
+                    grantee = USER
+                    OR grantee = 'PUBLIC'
+                    OR grantee IN (SELECT role FROM session_roles)
+                  )
             UNION
             SELECT table_name AS name
             FROM dba_tables

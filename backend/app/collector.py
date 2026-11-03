@@ -16,7 +16,8 @@ from sshtunnel import SSHTunnelForwarder
 from .models import DataSource
 from .security import decrypt_json
 from .capabilities import assert_supported_db_type
-from .catalog import OracleCatalogProvider
+from .catalog import OracleCatalogProvider, get_catalog_provider
+from .catalog.permissions import select_permissions as _select_permissions
 
 
 DEFAULT_PORTS = {"postgresql": 5432, "mysql": 3306, "mariadb": 3306, "mssql": 1433, "oracle": 1521, "db2": 50000, "vertica": 5433}
@@ -347,131 +348,16 @@ def _collect_procedures(connection: Connection, source: DataSource, schema_name:
 
 
 def _collect_select_permissions(connection: Connection, source: DataSource, schema_name: str) -> dict[str, dict]:
-    if source.db_type == "oracle":
-        return OracleCatalogProvider(source).select_permissions(connection, schema_name)
-    if source.db_type == "sqlite":
-        return {"*": {"select": True, "privileges": ["SELECT"], "checked_as": source.username or "sqlite"}}
-    queries = {
-        "postgresql": """
-            SELECT table_name AS name
-            FROM information_schema.tables
-            WHERE table_schema = :schema
-              AND has_table_privilege(
-                    current_user,
-                    format('%I.%I', table_schema, table_name),
-                    'SELECT'
-                  )
-        """,
-        "mysql": """
-            SELECT TABLE_NAME AS name
-            FROM information_schema.TABLE_PRIVILEGES
-            WHERE TABLE_SCHEMA = :schema
-              AND PRIVILEGE_TYPE = 'SELECT'
-              AND GRANTEE IN (
-                    CONCAT(CHAR(39), CURRENT_USER(), CHAR(39)),
-                    CONCAT(CHAR(39), USER(), CHAR(39))
-                  )
-            UNION
-            SELECT t.TABLE_NAME AS name
-            FROM information_schema.TABLES t
-            WHERE t.TABLE_SCHEMA = :schema
-              AND EXISTS (
-                    SELECT 1
-                    FROM information_schema.SCHEMA_PRIVILEGES p
-                    WHERE p.TABLE_SCHEMA = t.TABLE_SCHEMA
-                      AND p.PRIVILEGE_TYPE = 'SELECT'
-                      AND p.GRANTEE IN (
-                            CONCAT(CHAR(39), CURRENT_USER(), CHAR(39)),
-                            CONCAT(CHAR(39), USER(), CHAR(39))
-                          )
-                  )
-            UNION
-            SELECT t.TABLE_NAME AS name
-            FROM information_schema.TABLES t
-            WHERE t.TABLE_SCHEMA = :schema
-              AND EXISTS (
-                    SELECT 1
-                    FROM information_schema.USER_PRIVILEGES p
-                    WHERE p.PRIVILEGE_TYPE = 'SELECT'
-                      AND p.GRANTEE IN (
-                            CONCAT(CHAR(39), CURRENT_USER(), CHAR(39)),
-                            CONCAT(CHAR(39), USER(), CHAR(39))
-                          )
-                  )
-        """,
-        "mariadb": """
-            SELECT TABLE_NAME AS name
-            FROM information_schema.TABLE_PRIVILEGES
-            WHERE TABLE_SCHEMA = :schema
-              AND PRIVILEGE_TYPE = 'SELECT'
-              AND GRANTEE IN (
-                    CONCAT(CHAR(39), CURRENT_USER(), CHAR(39)),
-                    CONCAT(CHAR(39), USER(), CHAR(39))
-                  )
-            UNION
-            SELECT t.TABLE_NAME AS name
-            FROM information_schema.TABLES t
-            WHERE t.TABLE_SCHEMA = :schema
-              AND EXISTS (
-                    SELECT 1
-                    FROM information_schema.SCHEMA_PRIVILEGES p
-                    WHERE p.TABLE_SCHEMA = t.TABLE_SCHEMA
-                      AND p.PRIVILEGE_TYPE = 'SELECT'
-                      AND p.GRANTEE IN (
-                            CONCAT(CHAR(39), CURRENT_USER(), CHAR(39)),
-                            CONCAT(CHAR(39), USER(), CHAR(39))
-                          )
-                  )
-            UNION
-            SELECT t.TABLE_NAME AS name
-            FROM information_schema.TABLES t
-            WHERE t.TABLE_SCHEMA = :schema
-              AND EXISTS (
-                    SELECT 1
-                    FROM information_schema.USER_PRIVILEGES p
-                    WHERE p.PRIVILEGE_TYPE = 'SELECT'
-                      AND p.GRANTEE IN (
-                            CONCAT(CHAR(39), CURRENT_USER(), CHAR(39)),
-                            CONCAT(CHAR(39), USER(), CHAR(39))
-                          )
-                  )
-        """,
-        "mssql": "SELECT o.name FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE s.name = :schema AND o.type IN ('U', 'V') AND HAS_PERMS_BY_NAME(QUOTENAME(s.name) + '.' + QUOTENAME(o.name), 'OBJECT', 'SELECT') = 1",
-        "oracle": "SELECT table_name AS name FROM dba_tab_privs WHERE owner = :schema AND privilege = 'SELECT' AND (grantee = USER OR grantee = 'PUBLIC') UNION SELECT table_name AS name FROM dba_tables WHERE owner = :schema AND owner = USER UNION SELECT view_name AS name FROM dba_views WHERE owner = :schema AND owner = USER",
-        "db2": "SELECT TABNAME AS name FROM SYSCAT.TABAUTH WHERE TABSCHEMA = :schema AND SELECTAUTH IN ('Y', 'G', 'A') AND (GRANTEE = CURRENT USER OR GRANTEETYPE = 'P')",
-        "vertica": """
-            SELECT object_name AS name
-            FROM v_catalog.grants
-            WHERE object_schema = :schema
-              AND object_type IN ('TABLE', 'VIEW')
-              AND privilege = 'SELECT'
-              AND (grantee = CURRENT_USER OR grantee = 'PUBLIC')
-            UNION
-            SELECT table_name AS name
-            FROM v_catalog.tables
-            WHERE table_schema = :schema
-              AND owner_name = CURRENT_USER
-            UNION
-            SELECT table_name AS name
-            FROM v_catalog.views
-            WHERE table_schema = :schema
-              AND owner_name = CURRENT_USER
-        """,
-    }
-    rows = _query_rows(connection, queries[source.db_type], {"schema": schema_name})
-    return {row["name"]: {"select": True, "privileges": ["SELECT"], "checked_as": source.username or "current_user"} for row in rows}
+    """Compatibility wrapper; DB-specific permission SQL lives in catalog.permissions."""
+    return _select_permissions(connection, source, schema_name)
 
 
 def _source_table_names(connection: Connection, inspector, source: DataSource, schema_name: str) -> list[str]:
-    if source.db_type == "oracle":
-        return OracleCatalogProvider(source).table_names(connection, schema_name)
-    return inspector.get_table_names(schema=schema_name)
+    return get_catalog_provider(source, inspector).table_names(connection, schema_name)
 
 
 def _source_view_names(connection: Connection, inspector, source: DataSource, schema_name: str) -> list[str]:
-    if source.db_type == "oracle":
-        return OracleCatalogProvider(source).view_names(connection, schema_name)
-    return inspector.get_view_names(schema=schema_name)
+    return get_catalog_provider(source, inspector).view_names(connection, schema_name)
 
 
 def collect_schema(
@@ -485,10 +371,8 @@ def collect_schema(
     items = {item.upper() for item in (selected_items or DEFAULT_COLLECTION_ITEMS) if item.upper() in ALL_COLLECTION_ITEMS}
     with source_engine(source) as engine, engine.connect() as connection:
         inspector = inspect(engine)
-        if source.db_type == "oracle":
-            available = OracleCatalogProvider(source).schema_names(connection)
-        else:
-            available = inspector.get_schema_names()
+        provider = get_catalog_provider(source, inspector)
+        available = provider.schema_names(connection)
         configured_dataset = (source.options or {}).get("dataset") if source.db_type == "bigquery" else None
         schemas = selected_schemas or ([configured_dataset] if configured_dataset else _usable_schema_names(available, source))
         if source.db_type == "vertica":
@@ -526,7 +410,7 @@ def collect_schema(
                 permission_status = "success" if "SELECT PRIVILEGE" in items and permissions else "skipped"
                 permission_action = "완료" if permission_status == "success" else "스킵"
                 diagnostic["steps"].append({"step": phase, "status": permission_status, "count": len(permissions)})
-                emit(phase, permission_status, f"{schema_name} 조회 권한 수집을 {permission_action}했습니다.", {"count": len(permissions), "reason": "DBA_TAB_PRIVS 미조회 또는 권한 없음" if permission_status == "skipped" else None})
+                emit(phase, permission_status, f"{schema_name} 조회 권한 수집을 {permission_action}했습니다.", {"count": len(permissions), "reason": "권한 catalog 미지원 또는 조회 권한 없음" if permission_status == "skipped" else None})
 
                 phase = "storage"
                 emit(phase, "running", f"{schema_name} 스토리지 수집을 시작합니다.", {"schema": schema_name})
@@ -539,13 +423,13 @@ def collect_schema(
                 phase = "tables"
                 emit(phase, "running", f"{schema_name} 테이블 수집을 시작합니다.", {"schema": schema_name})
                 table_names = _source_table_names(connection, inspector, source, schema_name) if "TABLE" in items else []
-                oracle_columns = OracleCatalogProvider(source).columns_by_schema(connection, schema_name) if source.db_type == "oracle" and table_names else {}
+                provider_columns = provider.columns_by_schema(connection, schema_name) if table_names else {}
                 diagnostic["steps"].append({"step": phase, "status": "success" if "TABLE" in items else "skipped", "count": len(table_names)})
                 for table_name in table_names:
                     table = {
                         "name": table_name,
                         "comment": (_safe(lambda: inspector.get_table_comment(table_name, schema=schema_name), {}) or {}).get("text"),
-                        "columns": oracle_columns.get(table_name, []) if source.db_type == "oracle" else _safe(lambda: _source_columns(connection, inspector, source, schema_name, table_name), []),
+                        "columns": provider_columns.get(table_name, []) if source.db_type == "oracle" else _safe(lambda: _source_columns(connection, inspector, source, schema_name, table_name), []),
                         "primary_key": _safe(lambda: inspector.get_pk_constraint(table_name, schema=schema_name), {}),
                         "foreign_keys": _safe(lambda: inspector.get_foreign_keys(table_name, schema=schema_name), []),
                         "indexes": _safe(lambda: inspector.get_indexes(table_name, schema=schema_name), []) if "INDEX" in items else [],
