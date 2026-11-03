@@ -1,0 +1,22 @@
+# Vertica test-only stack. This file is intentionally separate from production Compose.
+services:
+  vertica-test:
+    image: jbfavre/vertica:latest
+    platform: linux/amd64
+    container_name: metavault-vertica-test
+    ports:
+      - "5433:5433"
+    volumes:
+      - metavault-vertica-test-data:/home/dbadmin/docker
+    shm_size: "2gb"
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/vertica/bin/vsql -h localhost -U dbadmin -d docker -Atqc 'SELECT 1' >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+
+volumes:
+  metavault-vertica-test-data:
+    name: metavault-vertica-test-data
