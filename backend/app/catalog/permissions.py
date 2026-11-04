@@ -173,6 +173,11 @@ _VERTICA = """
 """
 
 
+def permission_check_supported(source: DataSource) -> bool:
+    """Whether the SQL/catalog result can classify absent rows as denied."""
+    return source.db_type in {"sqlite", "postgresql", "mysql", "mariadb", "mssql", "oracle", "db2", "vertica"}
+
+
 def select_permissions(connection: Connection, source: DataSource, schema_name: str) -> dict[str, dict]:
     """Return effective SELECT permissions without changing the legacy payload."""
     if source.db_type == "oracle":

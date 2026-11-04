@@ -23,6 +23,7 @@ from .integration import ensure_integration_views, snapshot_diff, snapshot_summa
 from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaColumnExt, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
 from .capabilities import assert_supported_db_type
 from .collector import available_schema_names, source_engine, test_source
+from .catalog.preview import preview_source_permissions
 from .scheduler import enqueue_run, request_run_cancel, start_scheduler, stop_scheduler, sync_jobs
 from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut
 from .security import create_token, decode_token, decrypt_json, encrypt_json, hash_password, verify_password
@@ -495,6 +496,37 @@ def _test_source_payload(payload: DataSourceIn) -> dict[str, str]:
     apply_source(item, payload)
     test_source(item)
     return {"status": "connected"}
+
+
+def _preview_source_payload(payload: DataSourceIn) -> dict[str, Any]:
+    item = DataSource()
+    apply_source(item, payload)
+    return preview_source_permissions(item)
+
+
+def _preview_source_edit(source: DataSource, payload: DataSourceIn) -> dict[str, Any]:
+    draft = _copy_source(source)
+    apply_source(draft, payload)
+    return preview_source_permissions(draft)
+
+
+@app.post("/api/sources/schema-permissions")
+def preview_unsaved_schema_permissions(payload: DataSourceIn, _: User = Depends(require("sources:write"))):
+    try:
+        return _preview_source_payload(payload)
+    except Exception as exc:
+        raise HTTPException(400, f"스키마정보 권한 확인 실패: {str(exc)[:500]}") from exc
+
+
+@app.post("/api/sources/{source_id}/schema-permissions")
+def preview_saved_schema_permissions(source_id: int, payload: DataSourceIn, session: Session = Depends(get_session), _: User = Depends(require("sources:write"))):
+    source = session.get(DataSource, source_id)
+    if not source:
+        raise HTTPException(404, "데이터 소스를 찾을 수 없습니다.")
+    try:
+        return _preview_source_edit(source, payload)
+    except Exception as exc:
+        raise HTTPException(400, f"스키마정보 권한 확인 실패: {str(exc)[:500]}") from exc
 
 
 @app.post("/api/sources/test")
