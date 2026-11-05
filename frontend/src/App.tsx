@@ -1,5 +1,6 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useState } from 'react'
 import './source-filter.css'
+import './job-table.css'
 import {
   Activity, CalendarClock, Check, CheckCircle2, ChevronDown, CircleAlert, Database, Eye, Gauge,
   KeyRound, LayoutDashboard, LockKeyhole, LogOut, Menu as MenuIcon, Play, Plus,

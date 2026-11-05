@@ -1,0 +1,21 @@
+/* Keep action cells as table cells so row borders and column alignment remain intact. */
+td.row-actions {
+  width: 1%;
+  min-width: 156px;
+  text-align: right;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+td.row-actions button {
+  width: 30px;
+  height: 30px;
+  margin-left: 6px;
+  border: 1px solid #e1e5ec;
+  background: #fff;
+  border-radius: 6px;
+  color: #718095;
+  display: inline-grid;
+  place-items: center;
+  vertical-align: middle;
+}
