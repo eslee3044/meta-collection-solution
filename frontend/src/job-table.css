@@ -1,5 +1,6 @@
 /* Keep action cells as table cells so row borders and column alignment remain intact. */
 td.row-actions {
+  display: table-cell;
   width: 1%;
   min-width: 156px;
   text-align: right;
