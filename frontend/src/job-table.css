@@ -20,3 +20,107 @@ td.row-actions button {
   place-items: center;
   vertical-align: middle;
 }
+
+/* Import modal: keep the input, file picker, preview, and action bar on one shared edge. */
+.source-import-content {
+  min-width: 0;
+  padding: 4px 24px 24px;
+}
+
+.source-import-label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #536177;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.source-import-input {
+  width: 100%;
+  min-height: 210px;
+  resize: vertical;
+  padding: 13px 14px;
+  border: 1px solid #dfe4ec;
+  border-radius: 8px;
+  background: #fbfcfe;
+  color: #26354a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  outline: none;
+}
+
+.source-import-input:focus {
+  border-color: #4c6fff;
+  box-shadow: 0 0 0 3px rgba(76, 111, 255, .12);
+  background: #fff;
+}
+
+.source-import-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 12px;
+  color: #9aa4b3;
+  font-size: 11px;
+}
+
+.source-import-divider::before,
+.source-import-divider::after {
+  content: '';
+  height: 1px;
+  flex: 1;
+  background: #e7ebf1;
+}
+
+.source-import-file {
+  min-height: 78px;
+  margin: 0;
+}
+
+.source-import-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.source-import-toolbar button {
+  min-height: 36px;
+  padding: 8px 14px;
+}
+
+.source-import-duplicate {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  color: #536177;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.source-import-duplicate select {
+  min-width: 180px;
+}
+
+@media (max-width: 760px) {
+  .source-import-content {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .source-import-input {
+    min-height: 180px;
+  }
+
+  .source-import-duplicate {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .source-import-duplicate select {
+    width: 100%;
+  }
+}

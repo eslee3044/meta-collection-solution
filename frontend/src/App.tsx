@@ -151,11 +151,77 @@ function ImportGuide({ onClose }: { onClose: () => void }) {
 }
 
 function SourceImportDialog({ onClose, onDone }: { onClose: () => void; onDone: (message: string) => void }) {
-  const [file, setFile] = useState<File|null>(null); const [preview, setPreview] = useState<any>(null); const [duplicate, setDuplicate] = useState('skip'); const [busy, setBusy] = useState(false); const [error, setError] = useState('')
-  const request = async (path: string) => { if (!file) throw new Error('Import할 YAML 또는 JSON 파일을 선택하세요.'); const form = new FormData(); form.append('file', file); const token = localStorage.getItem('metavault_token'); const response = await fetch(`${path}${path.endsWith('/import')?`?duplicate=${duplicate}`:''}`, { method:'POST', headers: token ? { Authorization: `Bearer ${token}` } : {}, body: form }); const body = await response.json().catch(()=>({})); if (!response.ok) throw new Error(body.detail || 'Import 요청에 실패했습니다.'); return body }
-  const selectFile = async (value: File|null) => { setFile(value); setPreview(null); setError(''); if (!value) return; setBusy(true); try { setPreview(await request('/api/sources/import/preview')) } catch(e) { setError((e as Error).message) } finally { setBusy(false) } }
-  const submit = async () => { setBusy(true); setError(''); try { const result=await request('/api/sources/import'); onDone(`DB 접속 Import 완료: ${result.created}개 등록, ${result.updated}개 수정, ${result.skipped}개 건너뜀`) } catch(e) { setError((e as Error).message) } finally { setBusy(false) } }
-  return <Modal title="DB 접속 일괄 Import" subtitle="YAML 또는 JSON 파일을 미리 확인한 뒤 등록합니다." onClose={onClose} wide><div className="import-content"><label className="file-drop"><Upload size={22}/><b>{file ? file.name : 'YAML 또는 JSON 파일을 선택하세요'}</b><small>최대 2MB · .yaml, .yml, .json</small><input type="file" accept=".yaml,.yml,.json,application/json,text/yaml" onChange={e=>selectFile(e.target.files?.[0]||null)}/></label>{busy&&!preview&&<Loading/>}{preview&&<><div className="import-summary"><b>{preview.total}개 항목</b><span className="tag">정상 {preview.valid}개</span>{preview.errors.length>0&&<span className="tag error-tag">오류 {preview.errors.length}개</span>}</div>{preview.items.length>0&&<div className="import-preview"><table><thead><tr><th>이름</th><th>DB 종류</th><th>호스트</th><th>포트</th><th>데이터베이스</th><th>SSH</th></tr></thead><tbody>{preview.items.map((item:any)=><tr key={`${item.name}-${item.host}`}><td>{item.name}</td><td>{item.db_type}</td><td>{item.host}</td><td>{item.port||'—'}</td><td>{item.database||'—'}</td><td>{item.ssh_enabled?'사용':'—'}</td></tr>)}</tbody></table></div>}{preview.errors.length>0&&<div className="import-errors">{preview.errors.map((item:any)=><p key={item.row}>행 {item.row}: {item.error}</p>)}</div>}<label>중복 이름 처리<select value={duplicate} onChange={e=>setDuplicate(e.target.value)}><option value="skip">건너뛰기</option><option value="overwrite">기존 연결 덮어쓰기</option><option value="rename">이름 뒤에 번호 붙이기</option></select></label></>}</div>{error&&<div className="alert"><CircleAlert size={16}/>{error}</div>}<div className="modal-actions"><button type="button" className="ghost" onClick={onClose}>취소</button><button type="button" className="primary" disabled={!preview||!preview.valid||busy} onClick={submit}>{busy&&<RefreshCw className="spin" size={16}/>}Import 실행</button></div></Modal>
+  const [file, setFile] = useState<File|null>(null)
+  const [text, setText] = useState('')
+  const [preview, setPreview] = useState<any>(null)
+  const [duplicate, setDuplicate] = useState('skip')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const request = async (path: string) => {
+    if (!file && !text.trim()) throw new Error('YAML 또는 JSON 내용을 입력하거나 파일을 선택하세요.')
+    const sourceFile = file || new File([text], 'connections.yaml', { type: 'text/yaml' })
+    const form = new FormData()
+    form.append('file', sourceFile)
+    const token = localStorage.getItem('metavault_token')
+    const response = await fetch(`${path}${path.endsWith('/import') ? `?duplicate=${duplicate}` : ''}`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    })
+    const body = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(body.detail || 'Import 요청에 실패했습니다.')
+    return body
+  }
+
+  const previewContent = async () => {
+    setPreview(null)
+    setError('')
+    if (!file && !text.trim()) {
+      setError('YAML 또는 JSON 내용을 입력하거나 파일을 선택하세요.')
+      return
+    }
+    setBusy(true)
+    try { setPreview(await request('/api/sources/import/preview')) }
+    catch (e) { setError((e as Error).message) }
+    finally { setBusy(false) }
+  }
+
+  const selectFile = (value: File|null) => {
+    setFile(value)
+    if (value) setText('')
+    setPreview(null)
+    setError('')
+  }
+
+  const submit = async () => {
+    setBusy(true); setError('')
+    try {
+      const result = await request('/api/sources/import')
+      onDone(`DB 접속 Import 완료: ${result.created}개 등록, ${result.updated}개 수정, ${result.skipped}개 건너뜀`)
+    } catch (e) { setError((e as Error).message) }
+    finally { setBusy(false) }
+  }
+
+  return <Modal title="DB 접속 일괄 Import" subtitle="YAML 또는 JSON을 직접 입력하거나 파일로 불러온 뒤 미리 확인합니다." onClose={onClose} wide>
+    <div className="source-import-content">
+      <label className="source-import-label">YAML 또는 JSON 직접 입력<textarea className="source-import-input" value={text} onChange={e => { setText(e.target.value); setFile(null); setPreview(null); setError('') }} placeholder={'connections:\n  - name: 운영 PostgreSQL\n    db_type: postgresql\n    host: db.example.com\n    port: 5432\n    database: production\n    username: metadata_reader\n    password: $' + '{PROD_DB_PASSWORD}'} rows={10} /></label>
+      <div className="source-import-divider"><span>또는 파일 선택</span></div>
+      <label className="file-drop source-import-file"><Upload size={22}/><b>{file ? file.name : 'YAML 또는 JSON 파일을 선택하세요'}</b><small>최대 2MB · .yaml, .yml, .json</small><input type="file" accept=".yaml,.yml,.json,application/json,text/yaml" onChange={e => selectFile(e.target.files?.[0] || null)}/></label>
+      <div className="source-import-toolbar"><button type="button" className="ghost" onClick={previewContent} disabled={busy || (!file && !text.trim())}>{busy && <RefreshCw className="spin" size={15}/>}내용 미리보기</button></div>
+      {busy && !preview && <Loading/>}
+      {preview && (
+        <>
+          <div className="import-summary"><b>{preview.total}개 항목</b><span className="tag">정상 {preview.valid}개</span>{preview.errors.length > 0 && <span className="tag error-tag">오류 {preview.errors.length}개</span>}</div>
+          {preview.items.length > 0 && <div className="import-preview"><table><thead><tr><th>이름</th><th>DB 종류</th><th>호스트</th><th>포트</th><th>데이터베이스</th><th>SSH</th></tr></thead><tbody>{preview.items.map((item:any)=><tr key={`${item.name}-${item.host}`}><td>{item.name}</td><td>{item.db_type}</td><td>{item.host}</td><td>{item.port || '—'}</td><td>{item.database || '—'}</td><td>{item.ssh_enabled ? '사용' : '—'}</td></tr>)}</tbody></table></div>}
+          {preview.errors.length > 0 && <div className="import-errors">{preview.errors.map((item:any)=><p key={item.row}>행 {item.row}: {item.error}</p>)}</div>}
+          <label className="source-import-duplicate">중복 이름 처리<select value={duplicate} onChange={e => setDuplicate(e.target.value)}><option value="skip">건너뛰기</option><option value="overwrite">기존 연결 덮어쓰기</option><option value="rename">이름 뒤에 번호 붙이기</option></select></label>
+        </>
+      )}
+    </div>
+    {error && <div className="alert"><CircleAlert size={16}/>{error}</div>}
+    <div className="modal-actions"><button type="button" className="ghost" onClick={onClose}>취소</button><button type="button" className="primary" disabled={!preview || !preview.valid || busy} onClick={submit}>{busy && <RefreshCw className="spin" size={16}/>}Import 실행</button></div>
+  </Modal>
 }
 
 function Sources({ toast }: { toast: (m: string) => void }) {
