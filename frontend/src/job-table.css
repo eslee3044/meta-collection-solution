@@ -229,6 +229,43 @@ td.row-actions button {
   font-size: .92em;
 }
 
+.guide-item-catalog {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 16px;
+}
+
+.guide-item-catalog > div {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid #e6eaf0;
+  border-radius: 7px;
+  background: #fbfcfe;
+}
+
+.guide-item-catalog code {
+  width: fit-content;
+  color: #3458c5;
+  background: #eef2ff;
+  font-weight: 700;
+}
+
+.guide-item-catalog span {
+  color: #536177;
+  line-height: 1.55;
+}
+
+.guide-note {
+  padding: 11px 13px;
+  border-left: 3px solid #8da2ff;
+  border-radius: 5px;
+  background: #f5f7ff;
+  color: #536177 !important;
+}
+
 .guide-code {
   max-width: 100%;
   margin: 0 0 22px;
@@ -252,6 +289,11 @@ td.row-actions button {
 
   .guide-content h4 {
     font-size: 15px;
+  }
+
+  .guide-item-catalog > div {
+    grid-template-columns: 1fr;
+    gap: 6px;
   }
 
   .guide-code {

@@ -288,7 +288,51 @@ function JobImportGuide({ onClose }: { onClose: () => void }) {
     }
   ]
 }`
-  return <Modal title="수집 스케줄 Import 가이드" subtitle="YAML 또는 JSON으로 여러 스케줄을 한 번에 등록합니다." onClose={onClose} wide><div className="guide-content"><h4>필수 필드</h4><ul><li><b>name</b>: 수집 작업 이름</li><li><b>data_source</b>: DB 접속 관리에 등록된 연결 이름 또는 <b>data_source_id</b></li><li><b>schedule_type</b>: cron, interval, manual 중 하나</li><li><b>cron</b>: cron 방식의 실행 표현식</li><li><b>interval_minutes</b>: interval 방식의 실행 간격(분)</li></ul><h4>YAML 예시</h4><pre className="guide-code">{example}</pre><h4>JSON 예시</h4><pre className="guide-code">{jsonExample}</pre><p>중복 이름은 Import 화면에서 건너뛰기, 덮어쓰기, 이름 변경 중 선택합니다. 수집 항목은 현재 지원되는 작업 옵션을 그대로 사용합니다.</p></div></Modal>
+  return <Modal title="수집 스케줄 Import 가이드" subtitle="YAML 또는 JSON으로 여러 스케줄을 한 번에 등록합니다." onClose={onClose} wide>
+    <div className="guide-content">
+      <h4>필수 필드</h4>
+      <ul>
+        <li><b>name</b>: 수집 작업 이름</li>
+        <li><b>data_source</b>: DB 접속 관리에 등록된 연결 이름 또는 <b>data_source_id</b></li>
+        <li><b>schedule_type</b>: <code>cron</code>, <code>interval</code>, <code>manual</code> 중 하나</li>
+        <li><b>cron</b>: cron 방식의 실행 표현식</li>
+        <li><b>interval_minutes</b>: interval 방식의 실행 간격(분)</li>
+      </ul>
+
+      <h4>수집 객체 유형(collection_items)</h4>
+      <p>아래 코드를 배열에 넣어 수집할 메타데이터 범위를 지정합니다. 여러 코드를 동시에 선택할 수 있으며, 선택하지 않은 유형은 해당 작업에서 수집하지 않습니다.</p>
+      <div className="guide-item-catalog">
+        <div><code>INDEX</code><span>테이블에 정의된 인덱스 이름, 컬럼 순서, 유일성 등 인덱스 정보를 수집합니다.</span></div>
+        <div><code>TABLE</code><span>테이블 목록과 기본 테이블 메타데이터를 수집합니다. 컬럼 정보도 테이블 메타데이터 수집 과정에서 함께 처리됩니다.</span></div>
+        <div><code>VIEW</code><span>뷰 목록과 뷰 정의 SQL을 수집합니다.</span></div>
+        <div><code>PROCEDURE</code><span>프로시저와 함수 등 저장 프로그램의 목록 및 정의 관련 메타데이터를 수집합니다.</span></div>
+        <div><code>SELECT PRIVILEGE</code><span>테이블·뷰에 대한 SELECT/조회 권한과 권한 확인 결과를 수집합니다.</span></div>
+        <div><code>TRIGGER</code><span>테이블에 연결된 트리거의 이름, 대상 테이블, 실행 이벤트 등 트리거 정보를 수집합니다.</span></div>
+        <div><code>TABLE PARTITION</code><span>테이블 파티션의 파티션명, 경계값, 파티션 방식 등 테이블 파티션 정보를 수집합니다.</span></div>
+        <div><code>INDEX PARTITION</code><span>파티션된 인덱스의 파티션명과 인덱스 파티션 구조 정보를 수집합니다.</span></div>
+        <div><code>TABLE SUBPARTITION</code><span>테이블 하위 파티션의 계층, 이름, 경계값 등 서브파티션 정보를 수집합니다.</span></div>
+        <div><code>INDEX SUBPARTITION</code><span>인덱스 하위 파티션의 계층과 구성 정보를 수집합니다.</span></div>
+        <div><code>MVIEW</code><span>Materialized View 목록과 갱신·저장 관련 메타데이터를 수집합니다.</span></div>
+        <div><code>SEQUENCE</code><span>시퀀스 이름, 시작값, 증가값, 최솟값·최댓값 등 시퀀스 정보를 수집합니다.</span></div>
+        <div><code>DATABASE LINK</code><span>외부 데이터베이스 연결을 위한 Database Link의 이름과 연결 메타데이터를 수집합니다.</span></div>
+        <div><code>SYNONYM</code><span>테이블·뷰·프로시저 등을 가리키는 Synonym 이름과 대상 객체 정보를 수집합니다.</span></div>
+      </div>
+      <p className="guide-note"><b>주의:</b> 객체 유형은 DB 종류와 catalog provider가 지원하는 범위에 따라 실제 결과가 달라질 수 있습니다. 현재 기본 수집은 <code>INDEX</code>, <code>TABLE</code>, <code>VIEW</code>, <code>PROCEDURE</code>, <code>SELECT PRIVILEGE</code>이며, 파티션·MVIEW·시퀀스·Database Link·Synonym·Trigger는 DB별 지원 여부를 확인해야 합니다.</p>
+
+      <h4>기타 설정</h4>
+      <ul>
+        <li><b>schemas</b>: 수집할 스키마 목록입니다. 비워두면 시스템 스키마를 제외한 전체 스키마를 대상으로 합니다.</li>
+        <li><b>collect_storage</b>: <code>true</code>이면 테이블·인덱스 용량과 이전 수집 대비 증감량을 수집합니다.</li>
+        <li><b>is_active</b>: <code>true</code>이면 스케줄러가 실행하고, <code>false</code>이면 저장만 하고 자동 실행하지 않습니다.</li>
+      </ul>
+
+      <h4>YAML 예시</h4>
+      <pre className="guide-code">{example}</pre>
+      <h4>JSON 예시</h4>
+      <pre className="guide-code">{jsonExample}</pre>
+      <p>중복 이름은 Import 화면에서 건너뛰기, 덮어쓰기, 이름 변경 중 선택합니다. 비밀번호 등 민감정보는 포함하지 말고 환경변수 placeholder를 사용하세요.</p>
+    </div>
+  </Modal>
 }
 
 function JobImportDialog({ onClose, onDone }: { onClose: () => void; onDone: (message: string) => void }) {
