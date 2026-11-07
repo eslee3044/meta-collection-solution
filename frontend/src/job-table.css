@@ -124,3 +124,79 @@ td.row-actions button {
     width: 100%;
   }
 }
+
+/* Import guide modal content must not touch the modal edges. */
+.guide-content {
+  min-width: 0;
+  padding: 4px 30px 30px;
+  color: #26354a;
+  font-size: 13px;
+  line-height: 1.65;
+  overflow-x: hidden;
+}
+
+.guide-content h4 {
+  margin: 18px 0 8px;
+  color: #1b2638;
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.guide-content h4:first-child {
+  margin-top: 0;
+}
+
+.guide-content p {
+  margin: 0 0 16px;
+  color: #536177;
+}
+
+.guide-content ul {
+  margin: 0 0 20px;
+  padding-left: 22px;
+  color: #536177;
+}
+
+.guide-content li {
+  margin: 5px 0;
+}
+
+.guide-content code {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: #f1f4f8;
+  color: #42526b;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: .92em;
+}
+
+.guide-code {
+  max-width: 100%;
+  margin: 0 0 22px;
+  padding: 16px 18px;
+  overflow-x: auto;
+  border: 1px solid #e1e6ee;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #26354a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+@media (max-width: 760px) {
+  .guide-content {
+    padding: 2px 16px 22px;
+    font-size: 12px;
+  }
+
+  .guide-content h4 {
+    font-size: 15px;
+  }
+
+  .guide-code {
+    padding: 12px 13px;
+    font-size: 11px;
+  }
+}
