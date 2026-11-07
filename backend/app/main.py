@@ -555,7 +555,7 @@ def _normalise_job_item(raw: dict[str, Any], session: Session) -> JobIn:
 
 def _preview_job_item(item: JobIn, session: Session) -> dict[str, Any]:
     source = session.get(DataSource, item.data_source_id)
-    return {"name": item.name, "data_source": source.name if source else f"#{item.data_source_id}", "schedule_type": item.schedule_type, "cron": item.cron, "interval_minutes": item.interval_minutes, "schemas": item.schemas, "collection_items": item.collection_items, "collect_storage": item.collect_storage, "is_active": item.is_active}
+    return {"name": item.name, "data_source": source.name if source else f"#{item.data_source_id}", "schedule_type": item.schedule_type, "cron": item.cron if item.schedule_type == "cron" else None, "interval_minutes": item.interval_minutes if item.schedule_type == "interval" else None, "schemas": item.schemas, "collection_items": item.collection_items, "collect_storage": item.collect_storage, "is_active": item.is_active}
 
 
 @app.post("/api/jobs/import/preview")
