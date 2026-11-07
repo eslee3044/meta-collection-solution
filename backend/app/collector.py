@@ -26,6 +26,14 @@ ALL_COLLECTION_ITEMS = ("INDEX", "TABLE", "VIEW", "PROCEDURE", "SELECT PRIVILEGE
 SYSTEM_SCHEMAS = {"information_schema", "performance_schema", "mysql", "sys", "pg_catalog", "v_catalog", "v_monitor", "v_internal", "v_txtindex"}
 
 
+def normalize_collection_items(selected_items: list[str] | None) -> list[str]:
+    """Expand the import/UI convenience token ALL into supported item codes."""
+    raw = [str(item).upper() for item in (selected_items or DEFAULT_COLLECTION_ITEMS)]
+    if "ALL" in raw:
+        return list(ALL_COLLECTION_ITEMS)
+    return [item for item in raw if item in (*ALL_COLLECTION_ITEMS, "COLUMN")]
+
+
 def _usable_schema_names(available: list[str], source: DataSource) -> list[str]:
     return [
         name for name in available
@@ -368,7 +376,7 @@ def collect_schema(
     progress_callback: Callable[[str, str, str, dict | None], None] | None = None,
 ) -> tuple[dict, int, str]:
     assert_supported_db_type(source.db_type)
-    items = {item.upper() for item in (selected_items or DEFAULT_COLLECTION_ITEMS) if item.upper() in ALL_COLLECTION_ITEMS}
+    items = set(normalize_collection_items(selected_items))
     with source_engine(source) as engine, engine.connect() as connection:
         inspector = inspect(engine)
         provider = get_catalog_provider(source, inspector)

@@ -3,11 +3,16 @@ from pathlib import Path
 from sqlalchemy import create_engine, text
 
 from app.capabilities import is_supported_db_type, supported_db_types
-from app.collector import _normalize_column_metadata, collect_schema, test_source as collector_test_source
+from app.collector import ALL_COLLECTION_ITEMS, _normalize_column_metadata, collect_schema, normalize_collection_items, test_source as collector_test_source
 from app.main import _split_data_type
 from app.models import DataSource
 from app.scheduler import apply_storage_growth
 
+
+
+def test_all_collection_item_token_expands_to_all_supported_codes():
+    assert normalize_collection_items(["ALL"]) == list(ALL_COLLECTION_ITEMS)
+    assert normalize_collection_items(["TABLE", "all"]) == list(ALL_COLLECTION_ITEMS)
 
 
 def test_column_type_metadata_is_split_without_collation_leaking():

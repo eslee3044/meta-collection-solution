@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from ..collector import source_engine
+from ..collector import normalize_collection_items, source_engine
 from ..models import CollectionJob, DataSource
 
 
@@ -108,7 +108,7 @@ def _unknown_result(source: DataSource, requirement: dict[str, Any]) -> dict[str
 
 
 def check_collection_catalog_permissions(source: DataSource, job: CollectionJob) -> dict[str, Any]:
-    requirements = _requirements(source, list(job.collection_items or []))
+    requirements = _requirements(source, normalize_collection_items(list(job.collection_items or [])))
     selected_schemas = list(job.schemas or [])
     base = {
         "job_id": job.id,
