@@ -21,6 +21,65 @@ td.row-actions button {
   vertical-align: middle;
 }
 
+/* Collection schedule form: align all fields and sections with the modal header. */
+.job-form-content {
+  min-width: 0;
+  padding: 4px 24px 24px;
+}
+
+.job-form-content .form-section {
+  margin: 0;
+  padding: 0;
+}
+
+.job-form-content .form-grid {
+  min-width: 0;
+  gap: 16px;
+}
+
+.job-form-content .form-grid > label,
+.job-form-content .collection-items,
+.job-form-content .schema-selection {
+  min-width: 0;
+}
+
+.job-form-content fieldset {
+  margin: 2px 0 0;
+  padding: 16px;
+  border: 1px solid #e1e6ee;
+  border-radius: 9px;
+  background: #fbfcfe;
+}
+
+.job-form-content fieldset legend {
+  padding: 0 6px;
+  color: #536177;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.job-form-content .collection-item-actions {
+  margin: 0 0 12px;
+}
+
+.job-form-content .item-check-grid {
+  gap: 9px 12px;
+}
+
+.job-form-content .schema-selection {
+  margin-top: 4px;
+}
+
+@media (max-width: 760px) {
+  .job-form-content {
+    padding: 2px 16px 22px;
+  }
+
+  .job-form-content fieldset {
+    padding: 13px;
+  }
+}
+
 /* Import modal: keep the input, file picker, preview, and action bar on one shared edge. */
 .source-import-content {
   min-width: 0;
@@ -128,7 +187,7 @@ td.row-actions button {
 /* Import guide modal content must not touch the modal edges. */
 .guide-content {
   min-width: 0;
-  padding: 4px 30px 30px;
+  padding: 8px 24px 30px;
   color: #26354a;
   font-size: 13px;
   line-height: 1.65;
