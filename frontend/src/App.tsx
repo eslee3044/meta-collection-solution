@@ -299,6 +299,14 @@ function JobImportGuide({ onClose }: { onClose: () => void }) {
         <li><b>interval_minutes</b>: interval 방식의 실행 간격(분)</li>
       </ul>
 
+      <h4>실행 방식(schedule_type)</h4>
+      <div className="guide-item-catalog">
+        <div><code>cron</code><span>정해진 cron 표현식에 따라 반복 실행합니다. <code>cron</code> 필드가 필요합니다. 예: <code>0 2 * * *</code>는 매일 오전 2시에 실행합니다.</span></div>
+        <div><code>interval</code><span>일정한 시간 간격으로 반복 실행합니다. <code>interval_minutes</code> 필드에 분 단위 간격을 입력합니다. 예: <code>60</code>은 60분마다 실행합니다.</span></div>
+        <div><code>manual</code><span>스케줄러가 자동 실행하지 않고 사용자가 화면의 실행 버튼으로 요청할 때만 실행합니다. <code>cron</code>과 <code>interval_minutes</code>는 필요하지 않습니다.</span></div>
+      </div>
+      <p className="guide-note"><b>실행 주의:</b> <code>is_active</code>가 <code>true</code>인 <code>cron</code>·<code>interval</code> 작업만 스케줄러가 자동 실행합니다. <code>false</code>로 저장하면 작업 설정은 보존되지만 자동 실행되지 않습니다. 시간대는 현재 스케줄러 기준으로 Asia/Seoul(한국 시간)입니다.</p>
+
       <h4>수집 객체 유형(collection_items)</h4>
       <p>아래 코드를 배열에 넣어 수집할 메타데이터 범위를 지정합니다. 여러 코드를 동시에 선택할 수 있으며, 선택하지 않은 유형은 해당 작업에서 수집하지 않습니다.</p>
       <div className="guide-item-catalog">
