@@ -22,7 +22,7 @@ from .excel_export import build_schema_workbook
 from .integration import ensure_integration_views, snapshot_diff, snapshot_summary
 from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaColumnExt, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
 from .capabilities import assert_supported_db_type
-from .collector import available_schema_names, source_engine, test_source
+from .collector import available_schema_names, normalize_collection_items, source_engine, test_source
 from .catalog.collection_permissions import check_collection_catalog_permissions
 from .scheduler import enqueue_run, request_run_cancel, start_scheduler, stop_scheduler, sync_jobs
 from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut
@@ -98,6 +98,8 @@ async def lifespan(_: FastAPI):
         for job in session.scalars(select(CollectionJob)).all():
             if set(job.collection_items or []) == {"INDEX", "TABLE", "VIEW", "PROCEDURE"}:
                 job.collection_items = [*job.collection_items, "SELECT PRIVILEGE"]
+            elif "ALL" in (job.collection_items or []):
+                job.collection_items = normalize_collection_items(job.collection_items)
         seed(session)
     start_scheduler()
     yield
@@ -550,7 +552,8 @@ def _normalise_job_item(raw: dict[str, Any], session: Session) -> JobIn:
         if not source:
             raise ValueError(f"데이터 소스 '{source_ref}'를 찾을 수 없습니다.")
         item["data_source_id"] = source.id
-    return JobIn.model_validate(item)
+    payload = JobIn.model_validate(item)
+    return payload.model_copy(update={"collection_items": normalize_collection_items(payload.collection_items)})
 
 
 def _preview_job_item(item: JobIn, session: Session) -> dict[str, Any]:
@@ -611,7 +614,7 @@ def create_job(payload: JobIn, session: Session = Depends(get_session), _: User 
         assert_supported_db_type(source.db_type)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    item = CollectionJob(**payload.model_dump())
+    item = CollectionJob(**payload.model_dump(exclude={"collection_items"}), collection_items=normalize_collection_items(payload.collection_items))
     session.add(item)
     session.commit()
     sync_jobs()
@@ -625,7 +628,7 @@ def update_job(job_id: int, payload: JobIn, session: Session = Depends(get_sessi
     if not item:
         raise HTTPException(404, "수집 작업을 찾을 수 없습니다.")
     for key, value in payload.model_dump().items():
-        setattr(item, key, value)
+        setattr(item, key, normalize_collection_items(value) if key == "collection_items" else value)
     session.commit()
     sync_jobs()
     session.refresh(item)
