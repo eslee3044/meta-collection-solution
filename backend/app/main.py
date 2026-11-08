@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import Base, SessionLocal, engine, get_session
 from .dependencies import current_user, require
-from .excel_export import build_schema_workbook
+from .excel_export import build_schema_workbook, build_sources_workbook
 from .integration import ensure_integration_views, snapshot_diff, snapshot_summary
 from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaColumnExt, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
 from .capabilities import assert_supported_db_type
@@ -420,6 +420,12 @@ def _test_imported_sources(session: Session, source_ids: list[int]) -> dict[str,
     return result
 
 
+@app.get("/api/sources/export.xlsx")
+def export_sources(session: Session = Depends(get_session), _: User = Depends(require("sources:read"))):
+    sources = session.scalars(select(DataSource).order_by(DataSource.name)).all()
+    rows = ({"name": source.name, "db_type": source.db_type, "host": source.host, "port": source.port, "database": source.database, "username": source.username, "ssh_enabled": source.ssh_enabled, "status": source.status, "last_tested_at": source.last_tested_at, "created_at": source.created_at} for source in sources)
+    content = build_sources_workbook(rows, datetime.now(timezone.utc))
+    return Response(content=content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=metavault_sources.xlsx"})
 @app.post("/api/sources/import/preview")
 async def preview_sources_import(file: UploadFile = File(...), _: User = Depends(require("sources:write"))):
     items = _parse_source_import(file.filename or "connections.yaml", await file.read())

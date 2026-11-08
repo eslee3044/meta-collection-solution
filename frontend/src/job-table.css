@@ -302,7 +302,23 @@ td.row-actions button {
   }
 }
 
-/* Clicking a schedule row filters the execution history to that job. */
+/* Keep execution-history actions on one line inside the panel header. */
+.panel-head .source-actions {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  gap: 8px !important;
+  flex-wrap: nowrap !important;
+  width: auto !important;
+}
+
+.panel-head .source-actions button {
+  flex: 0 0 auto !important;
+  margin: 0 !important;
+  white-space: nowrap;
+}
+
 .table-panel tbody tr {
   cursor: pointer;
 }
@@ -317,4 +333,35 @@ td.row-actions button {
 
 .table-panel tbody tr.selected-job-row:hover {
   background: #e8f1ff;
+}
+
+/* Database connections are shown as a dense, horizontally scrollable list. */
+.source-list-table {
+  overflow-x: auto;
+}
+
+.source-list-table table {
+  min-width: 1080px;
+}
+
+.source-list-table th,
+.source-list-table td {
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.source-list-table td code {
+  font-size: 11px;
+  color: #536177;
+}
+
+.source-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 190px;
+}
+
+.source-name-cell .db-logo {
+  flex: 0 0 auto;
 }

@@ -12,6 +12,31 @@ HEADER_COLOR = "#15243A"
 LIGHT_COLOR = "#EDF1FF"
 
 
+def build_sources_workbook(sources: Iterable[dict[str, Any]], exported_at: datetime) -> bytes:
+    source_rows = list(sources)
+    output = BytesIO()
+    workbook = xlsxwriter.Workbook(output, {"in_memory": True})
+    workbook.set_properties({"title": "MetaVault database connections", "subject": "Database connection list", "author": "MetaVault"})
+    header = workbook.add_format({"bold": True, "font_color": "#FFFFFF", "bg_color": HEADER_COLOR, "border": 1})
+    text = workbook.add_format({"border": 1, "valign": "top"})
+    date = workbook.add_format({"border": 1, "num_format": "yyyy-mm-dd hh:mm"})
+    worksheet = workbook.add_worksheet("DB 접속 목록")
+    columns = ["연결 이름", "DB 종류", "호스트", "포트", "데이터베이스", "사용자명", "SSH 사용", "상태", "최근 테스트", "등록일"]
+    for index, column in enumerate(columns):
+        worksheet.write(0, index, column, header)
+    for row, source in enumerate(source_rows, start=1):
+        values = [source.get("name", ""), source.get("db_type", ""), source.get("host", ""), source.get("port") or "", source.get("database", ""), source.get("username", ""), "사용" if source.get("ssh_enabled") else "미사용", source.get("status", ""), source.get("last_tested_at"), source.get("created_at")]
+        for column, value in enumerate(values):
+            worksheet.write_datetime(row, column, value.replace(tzinfo=None), date) if isinstance(value, datetime) else worksheet.write(row, column, value, text)
+    widths = [24, 14, 28, 10, 24, 20, 12, 14, 20, 20]
+    for index, width in enumerate(widths):
+        worksheet.set_column(index, index, width)
+    worksheet.freeze_panes(1, 0)
+    worksheet.autofilter(0, 0, len(source_rows), len(columns) - 1)
+    workbook.close()
+    return output.getvalue()
+
+
 def build_schema_workbook(payload: dict[str, Any], captured_at: datetime, fingerprint: str, selected_items: set[str] | None = None) -> bytes:
     selected = {"SUMMARY", "TABLE", "COLUMN", "VIEW", "INDEX", "FOREIGN KEY", "PROCEDURE", "SELECT PRIVILEGE", "STORAGE"} if selected_items is None else selected_items
     output = BytesIO()
