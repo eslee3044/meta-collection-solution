@@ -3,7 +3,7 @@ from threading import Barrier
 
 from app.database import Base
 from app.models import CollectionJob, CollectionRun, DataSource
-from app.worker import worker_once
+from app.worker import dispatch_queued_runs, worker_once
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import Session
@@ -31,6 +31,24 @@ def test_worker_once_dispatches_queued_runs_to_executor():
 
     assert count == 1
     assert calls == [(job.id, run.id)]
+
+
+def test_dispatch_queued_runs_can_submit_new_work_without_waiting_for_existing_run():
+    _, session = make_session()
+    source = DataSource(name="source", db_type="sqlite")
+    job = CollectionJob(name="job", data_source=source, schemas=[])
+    queued = CollectionRun(job=job, status="queued", current_step="queued")
+    session.add(queued)
+    session.commit()
+    submitted = []
+
+    count = dispatch_queued_runs(
+        session,
+        lambda job_id, run_id, source_id: submitted.append((job_id, run_id, source_id)),
+    )
+
+    assert count == 1
+    assert submitted == [(job.id, queued.id, source.id)]
 
 
 def test_worker_once_recovers_stalled_running_runs():
