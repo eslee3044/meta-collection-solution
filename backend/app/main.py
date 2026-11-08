@@ -681,6 +681,31 @@ def check_job_schema_permissions(job_id: int, session: Session = Depends(get_ses
         raise HTTPException(400, f"메타수집 catalog 권한 확인 실패: {str(exc)[:500]}") from exc
 
 
+@app.post("/api/sources/{source_id}/schema-permissions")
+def check_source_schema_permissions(source_id: int, session: Session = Depends(get_session), _: User = Depends(require("sources:read"))):
+    source = session.get(DataSource, source_id)
+    if not source:
+        raise HTTPException(404, "데이터 소스를 찾을 수 없습니다.")
+    jobs = session.scalars(select(CollectionJob).where(CollectionJob.data_source_id == source_id).order_by(CollectionJob.name)).all()
+    if not jobs:
+        return {"source_name": source.name, "summary": {"allowed": 0, "denied": 0, "unknown": 0, "error": 0}, "requirements": [], "message": "연결된 수집 스케줄이 없습니다."}
+    try:
+        merged: dict[str, dict[str, Any]] = {}
+        rank = {"allowed": 0, "unknown": 1, "error": 2, "denied": 3}
+        for job in jobs:
+            result = check_collection_catalog_permissions(source, job)
+            for item in result.get("requirements", []):
+                name = item.get("object_name", "")
+                current = merged.get(name)
+                if not current or rank.get(item.get("status", "unknown"), 1) > rank.get(current.get("status", "unknown"), 1):
+                    merged[name] = dict(item)
+                elif current:
+                    current["required_for"] = sorted(set(current.get("required_for", [])) | set(item.get("required_for", [])))
+        requirements = sorted(merged.values(), key=lambda item: item.get("object_name", ""))
+        summary = {status: sum(1 for item in requirements if item.get("status") == status) for status in ("allowed", "denied", "unknown", "error")}
+        return {"source_name": source.name, "summary": summary, "requirements": requirements, "job_count": len(jobs)}
+    except Exception as exc:
+        raise HTTPException(400, f"메타수집 catalog 권한 확인 실패: {str(exc)[:500]}") from exc
 @app.post("/api/jobs/{job_id}/run", status_code=202)
 def run_job(job_id: int, session: Session = Depends(get_session), _: User = Depends(require("jobs:write"))):
     job = session.get(CollectionJob, job_id)
