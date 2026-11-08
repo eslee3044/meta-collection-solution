@@ -1,9 +1,11 @@
+from datetime import datetime, timedelta, timezone
+
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import Session
 
 from app.models import CollectionJob, CollectionRun, DataSource, RunLog, SchemaSnapshot
-from app.scheduler import CollectionCancelled, request_run_cancel
+from app.scheduler import CollectionCancelled, recover_orphan_runs, request_run_cancel
 
 
 def _lifecycle_engine():
@@ -41,6 +43,49 @@ def test_request_run_cancel_transitions_running_run():
         assert cancelled.status == "cancel_requested"
         assert cancelled.cancel_requested_at is not None
         assert cancelled.current_step == "cancel_requested"
+
+
+def test_request_run_cancel_finishes_queued_run_immediately():
+    engine = _lifecycle_engine()
+    with Session(engine) as session:
+        run = CollectionRun(job_id=1, status="queued", current_step="queued")
+        session.add(run)
+        session.commit()
+
+        cancelled = request_run_cancel(session, run.id)
+
+        assert cancelled.status == "cancelled"
+        assert cancelled.cancel_requested_at is not None
+        assert cancelled.cancelled_at is not None
+        assert cancelled.finished_at is not None
+        assert cancelled.current_step == "cancelled"
+
+
+def test_recover_orphan_runs_finishes_stale_cancel_request():
+    engine = _lifecycle_engine()
+    with Session(engine) as session:
+        run = CollectionRun(
+            job_id=1,
+            status="cancel_requested",
+            current_step="cancel_requested",
+            cancel_requested_at=datetime.now(timezone.utc) - timedelta(hours=1),
+            heartbeat_at=datetime.now(timezone.utc) - timedelta(hours=1),
+        )
+        session.add(run)
+        session.commit()
+
+        recovered = recover_orphan_runs(
+            session,
+            datetime.now(timezone.utc) - timedelta(minutes=15),
+        )
+
+        session.refresh(run)
+        assert recovered == 1
+        assert run.status == "cancelled"
+        assert run.current_step == "cancelled"
+        assert run.cancelled_at is not None
+        assert run.finished_at is not None
+        assert run.error_code == "COLLECTION_CANCELLED"
 
 
 def test_execute_job_cancellation_does_not_save_snapshot(monkeypatch):

@@ -48,6 +48,23 @@ def test_claim_run_is_atomic_and_only_first_worker_wins():
     assert run.heartbeat_at is not None
 
 
+def test_claim_run_blocks_another_run_for_same_data_source():
+    engine, session = make_session()
+    source = DataSource(name="source", db_type="sqlite")
+    first_job = CollectionJob(name="job-1", data_source=source, schemas=[])
+    second_job = CollectionJob(name="job-2", data_source=source, schemas=[])
+    first = CollectionRun(job=first_job, status="queued", current_step="queued")
+    second = CollectionRun(job=second_job, status="queued", current_step="queued")
+    session.add_all([first, second])
+    session.commit()
+
+    assert claim_run(session, first.id) is True
+    assert claim_run(session, second.id) is False
+
+    session.refresh(second)
+    assert second.status == "queued"
+
+
 def test_dispatch_queued_runs_submits_only_queued_runs():
     engine, session = make_session()
     source = DataSource(name="source", db_type="sqlite")
