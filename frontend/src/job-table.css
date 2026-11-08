@@ -365,3 +365,8 @@ td.row-actions button {
 .source-name-cell .db-logo {
   flex: 0 0 auto;
 }
+
+.toolbar-download {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
