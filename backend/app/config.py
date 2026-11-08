@@ -1,13 +1,19 @@
 from functools import lru_cache
 from pathlib import Path
 
+from sqlalchemy.engine import URL
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     app_name: str = "MetaVault"
-    database_url: str = "sqlite:///./metavault.db"
+    database_url: str | None = None
+    database_host: str | None = None
+    database_port: int | None = None
+    database_name: str | None = None
+    database_user: str | None = None
+    database_password: str | None = None
     secret_key: str = "dev-only-change-me"
     admin_email: str = "admin@example.com"
     admin_password: str = "Admin123!"
@@ -25,6 +31,23 @@ class Settings(BaseSettings):
         env_prefix="METAVAULT_",
         extra="ignore",
     )
+
+    @model_validator(mode="after")
+    def build_database_url(self):
+        if self.database_url:
+            return self
+        if all(value is not None for value in (self.database_host, self.database_port, self.database_name, self.database_user, self.database_password)):
+            self.database_url = URL.create(
+                "postgresql+psycopg",
+                username=self.database_user,
+                password=self.database_password,
+                host=self.database_host,
+                port=self.database_port,
+                database=self.database_name,
+            ).render_as_string(hide_password=False)
+        else:
+            self.database_url = "sqlite:///./metavault.db"
+        return self
 
     @property
     def origins(self) -> list[str]:

@@ -8,6 +8,19 @@ from app.main import app
 from app.security import decode_token
 
 
+def test_database_components_encode_special_characters_in_password():
+    settings = Settings(
+        database_url=None,
+        database_host="db.example.com",
+        database_port=5432,
+        database_name="metavault",
+        database_user="meta_runtime",
+        database_password="abc123@",
+    )
+
+    assert settings.database_url == "postgresql+psycopg://meta_runtime:abc123%40@db.example.com:5432/metavault"
+
+
 def test_docker_settings_reject_insecure_bootstrap_values():
     with pytest.raises(ValueError, match="SECRET_KEY"):
         Settings(
