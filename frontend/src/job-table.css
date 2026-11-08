@@ -301,3 +301,20 @@ td.row-actions button {
     font-size: 11px;
   }
 }
+
+/* Clicking a schedule row filters the execution history to that job. */
+.table-panel tbody tr {
+  cursor: pointer;
+}
+
+.table-panel tbody tr.selected-job-row {
+  background: #eef5ff;
+}
+
+.table-panel tbody tr:hover {
+  background: #f7faff;
+}
+
+.table-panel tbody tr.selected-job-row:hover {
+  background: #e8f1ff;
+}

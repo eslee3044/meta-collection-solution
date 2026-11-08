@@ -699,8 +699,11 @@ def delete_job(job_id: int, session: Session = Depends(get_session), _: User = D
 
 
 @app.get("/api/runs", response_model=list[RunOut])
-def list_runs(session: Session = Depends(get_session), _: User = Depends(require("jobs:read"))):
-    return session.scalars(select(CollectionRun).order_by(desc(CollectionRun.started_at)).limit(100)).all()
+def list_runs(job_id: int | None = Query(default=None, ge=1), session: Session = Depends(get_session), _: User = Depends(require("jobs:read"))):
+    query = select(CollectionRun).order_by(desc(CollectionRun.started_at)).limit(100)
+    if job_id is not None:
+        query = query.where(CollectionRun.job_id == job_id)
+    return session.scalars(query).all()
 
 
 @app.post("/api/runs/{run_id}/cancel", response_model=RunOut)
