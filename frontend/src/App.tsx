@@ -6,7 +6,7 @@ import {
   KeyRound, LayoutDashboard, LockKeyhole, LogOut, Menu as MenuIcon, Play, Plus,
   RefreshCw, Search, Server, ShieldCheck, TableProperties, Trash2, Pencil, Download, Upload, BookOpen, Users, X, Zap,
 } from 'lucide-react'
-import { api, ApiError, fmt } from './api'
+import { api, ApiError, authorizedFetch, fmt } from './api'
 import type { Capabilities, Job, Menu, Permission, Role, Run, Source, User } from './types'
 
 type Page = 'dashboard' | 'sources' | 'metadata' | 'registered' | 'jobs' | 'users' | 'roles'
@@ -61,7 +61,7 @@ function Empty({ title, text, icon: Icon = Database }: { title: string; text: st
   return <div className="empty"><div className="empty-icon"><Icon size={25}/></div><h3>{title}</h3><p>{text}</p></div>
 }
 
-function Login({ onLogin }: { onLogin: (user: User) => void }) {
+function Login({ onLogin, notice = '' }: { onLogin: (user: User) => void; notice?: string }) {
   const [email, setEmail] = useState('admin@example.com')
   const [password, setPassword] = useState('Admin123!')
   const [error, setError] = useState('')
@@ -75,7 +75,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
   }
   return <main className="login-page">
     <section className="login-brand"><div className="brand"><div className="brand-mark"><Database size={22}/></div><b>Meta<span>Vault</span></b></div><div className="login-copy"><p className="eyebrow">ENTERPRISE DATA INTELLIGENCE</p><h1>흩어진 데이터 구조를<br/><em>하나의 자산으로.</em></h1><p>다양한 데이터베이스의 스키마를 안전하게 수집하고,<br/>조직의 데이터 자산을 한곳에서 관리하세요.</p><div className="feature-row"><span><Zap/>자동화 수집</span><span><KeyRound/>다중 인증</span><span><ShieldCheck/>세밀한 권한</span></div></div><div className="orb orb-one"/><div className="orb orb-two"/></section>
-    <section className="login-form-wrap"><form className="login-card" onSubmit={submit}><div className="mobile-brand brand"><div className="brand-mark"><Database size={20}/></div><b>Meta<span>Vault</span></b></div><p className="eyebrow">WELCOME BACK</p><h2>관리자 로그인</h2><p className="muted">계속하려면 계정 정보를 입력하세요.</p>{error && <div className="alert"><CircleAlert size={16}/>{error}</div>}<label>이메일 주소<input value={email} onChange={e => setEmail(e.target.value)} type="email" required/></label><label>비밀번호<input value={password} onChange={e => setPassword(e.target.value)} type="password" required/></label><button className="primary login-button" disabled={busy}>{busy ? <RefreshCw className="spin" size={18}/> : <LockKeyhole size={18}/>}로그인</button><p className="login-hint">초기 계정은 환경변수로 변경할 수 있습니다.</p></form></section>
+    <section className="login-form-wrap"><form className="login-card" onSubmit={submit}><div className="mobile-brand brand"><div className="brand-mark"><Database size={20}/></div><b>Meta<span>Vault</span></b></div><p className="eyebrow">WELCOME BACK</p><h2>관리자 로그인</h2><p className="muted">계속하려면 계정 정보를 입력하세요.</p>{(notice || error) && <div className="alert"><CircleAlert size={16}/>{notice || error}</div>}<label>이메일 주소<input value={email} onChange={e => setEmail(e.target.value)} type="email" required/></label><label>비밀번호<input value={password} onChange={e => setPassword(e.target.value)} type="password" required/></label><button className="primary login-button" disabled={busy}>{busy ? <RefreshCw className="spin" size={18}/> : <LockKeyhole size={18}/>}로그인</button><p className="login-hint">초기 계정은 환경변수로 변경할 수 있습니다.</p></form></section>
   </main>
 }
 
@@ -164,7 +164,7 @@ function SourceImportDialog({ onClose, onDone }: { onClose: () => void; onDone: 
     const form = new FormData()
     form.append('file', sourceFile)
     const token = localStorage.getItem('metavault_token')
-    const response = await fetch(`${path}${path.endsWith('/import') ? `?duplicate=${duplicate}` : ''}`, {
+    const response = await authorizedFetch(`${path}${path.endsWith('/import') ? `?duplicate=${duplicate}` : ''}`, {
       method: 'POST',
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       body: form,
@@ -244,7 +244,7 @@ function MetaTableConfigPanel({ sources, toast, open, onClose }: { sources: Sour
   const { data: status, loading: statusLoading, reload: reloadStatus } = useLoad<any>('/api/meta-table-config/status', { status: 'ready', source_type: 'internal', missing_tables: [] }, [])
   const [form, setForm] = useState(data)
   useEffect(() => { if (!loading) setForm(data) }, [data, loading])
-  const downloadCreateScript = async () => { const token = localStorage.getItem('metavault_token'); const response = await fetch('/api/metadata/register-script', { headers: token ? { Authorization: `Bearer ${token}` } : {} }); if (!response.ok) throw new Error('생성 스크립트 다운로드에 실패했습니다.'); const blob = await response.blob(); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'metavault_meta_tables.sql'; anchor.click(); URL.revokeObjectURL(url) }
+  const downloadCreateScript = async () => { const token = localStorage.getItem('metavault_token'); const response = await authorizedFetch('/api/metadata/register-script', { headers: token ? { Authorization: `Bearer ${token}` } : {} }); if (!response.ok) throw new Error('생성 스크립트 다운로드에 실패했습니다.'); const blob = await response.blob(); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'metavault_meta_tables.sql'; anchor.click(); URL.revokeObjectURL(url) }
   const save = async (event: FormEvent) => { event.preventDefault(); try {     await api('/api/meta-table-config', { method: 'PUT', body: JSON.stringify({ ...form, external_source_id: form.source_type === 'external' && form.external_source_id ? Number(form.external_source_id) : null }) }); await reloadConfig(); await reloadStatus(); toast('메타 테이블 조회 설정을 저장했습니다.'); onClose() } catch (error) { const message = (error as Error).message; await reloadStatus(); if (message.startsWith('META_TABLES_MISSING:') && window.confirm('외부 DB에 메타 테이블이 없습니다. 생성 스크립트를 다운로드하시겠습니까?')) { try { await downloadCreateScript(); toast('생성 스크립트를 다운로드했습니다. 외부 DB에서 실행한 뒤 다시 저장하세요.') } catch (downloadError) { toast((downloadError as Error).message) } } else toast(message) } }
   if (!open) return null
   return <Modal title="메타 테이블 조회 설정" subtitle="ETL 생성에 사용할 조회 DB와 스키마·테이블명을 지정합니다." onClose={onClose}><form className="form-grid meta-config-form" onSubmit={save}><div className={`meta-config-status ${status.status}`}><span className="meta-status-dot"/><b>{statusLoading ? '메타 테이블 상태 확인 중' : status.status === 'ready' ? '메타 테이블 조회 설정 정상' : status.status === 'missing' ? '메타 테이블 생성 필요' : '메타 테이블 상태 확인 실패'}</b>{!statusLoading && status.status === 'missing' && <small>{(status.missing_tables || []).join(', ')}</small>}{!statusLoading && status.status === 'error' && <small>{status.message}</small>}</div><label>조회 DB<select value={form.source_type} onChange={e => setForm({ ...form, source_type: e.target.value, external_source_id: null })}><option value="internal">내부 MetaVault DB</option><option value="external">외부 DB 접속정보</option></select></label>{form.source_type === 'external' && <label>외부 DB<select required value={form.external_source_id || ''} onChange={e => setForm({ ...form, external_source_id: e.target.value })}><option value="">외부 DB를 선택하세요</option>{sources.map(source => <option value={source.id} key={source.id}>{source.name} · {dbNames[source.db_type] || source.db_type}</option>)}</select></label>}<label>스키마명<input required value={form.schema_name} onChange={e => setForm({ ...form, schema_name: e.target.value })}/></label><label>테이블명<input required value={form.tables_table_name} onChange={e => setForm({ ...form, tables_table_name: e.target.value })}/></label><label>컬럼 테이블명<input required value={form.columns_table_name} onChange={e => setForm({ ...form, columns_table_name: e.target.value })}/></label><div className="form-actions"><button className="primary" type="submit">설정 저장</button></div></form></Modal>}
@@ -359,7 +359,7 @@ function JobImportDialog({ onClose, onDone }: { onClose: () => void; onDone: (me
     const form = new FormData()
     form.append('file', sourceFile)
     const token = localStorage.getItem('metavault_token')
-    const response = await fetch(`${path}${path.endsWith('/import') ? `?duplicate=${duplicate}` : ''}`, {
+    const response = await authorizedFetch(`${path}${path.endsWith('/import') ? `?duplicate=${duplicate}` : ''}`, {
       method: 'POST',
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       body: form,
@@ -489,7 +489,7 @@ function Metadata() {
     if (!current) return
     const token = localStorage.getItem('metavault_token')
     const params = new URLSearchParams({ items: items.join(',') })
-    const response = await fetch(`/api/metadata/${current.id}/export.xlsx?${params.toString()}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+    const response = await authorizedFetch(`/api/metadata/${current.id}/export.xlsx?${params.toString()}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
     if (!response.ok) throw new Error('Excel 다운로드에 실패했습니다.')
     const blob = await response.blob()
     const url = URL.createObjectURL(blob)
@@ -601,7 +601,7 @@ function RegisterMetadataDialog({ snapshot, onClose, onDone }: { snapshot: any; 
   useEffect(() => { localStorage.setItem('metavault.pageSize', String(pageSize)) }, [pageSize])
   useEffect(() => { setPage(1) }, [query, pageSize])
   const set = (key: string, value: string) => setForm(current => { if (key === 'system_cd') { const systemCode = value.toUpperCase().replace(/[^A-Z0-9_]/g, '').slice(0, 4); const normalizedCode = systemCode ? systemCode[0].replace(/[^A-Z]/g, '') + systemCode.slice(1).replace(/_/g, '') : ''; const finalSystemCode = normalizedCode.slice(0, 3) + (systemCode.length === 4 && systemCode[3] === '_' ? '_' : (normalizedCode[3] || '')); return { ...current, system_cd: finalSystemCode, tgt_ds_cd: !current.tgt_ds_cd || current.tgt_ds_cd === `ST_${current.system_cd}` ? `ST_${finalSystemCode}` : current.tgt_ds_cd } } return { ...current, [key]: value } })
-  const downloadCreateScript = async () => { const token = localStorage.getItem('metavault_token'); const response = await fetch('/api/metadata/register-script', { headers: token ? { Authorization: `Bearer ${token}` } : {} }); if (!response.ok) throw new Error('생성 스크립트 다운로드에 실패했습니다.'); const blob = await response.blob(); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'metavault_meta_tables.sql'; anchor.click(); URL.revokeObjectURL(url) }
+  const downloadCreateScript = async () => { const token = localStorage.getItem('metavault_token'); const response = await authorizedFetch('/api/metadata/register-script', { headers: token ? { Authorization: `Bearer ${token}` } : {} }); if (!response.ok) throw new Error('생성 스크립트 다운로드에 실패했습니다.'); const blob = await response.blob(); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'metavault_meta_tables.sql'; anchor.click(); URL.revokeObjectURL(url) }
   const submit = async (event: FormEvent) => { event.preventDefault(); setError(''); if (!selected.length) { setError('등록할 테이블을 하나 이상 선택하세요.'); return } if (selected.some(name => !(selectedColumns[name]?.length))) { setError('선택한 모든 테이블에서 컬럼을 하나 이상 선택하세요.'); return } const registrationTableNames = Array.from(new Set(selected)).filter(name => tables.some((table: any) => table.name === name)); const registrationColumns = Object.fromEntries(registrationTableNames.map(name => [name, selectedColumns[name] || []])); const registrationColumnCount = registrationTableNames.reduce((total, name) => total + registrationColumns[name].length, 0); try { await api<any>('/api/metadata/register', { method: 'POST', body: JSON.stringify({ snapshot_id: snapshot.id, table_names: registrationTableNames, columns_by_table: registrationColumns, table_comments: tableComments, postfix: form.target_name_suffix, ...form }) }); onDone(); alert(`메타 등록 완료: 테이블 ${registrationTableNames.length}개, 컬럼 ${registrationColumnCount}개`) } catch (e) { const message = (e as Error).message; if (message.startsWith('META_TABLES_MISSING:') && window.confirm('외부 DB에 메타 테이블이 없습니다. 생성 스크립트를 다운로드하시겠습니까?')) { try { await downloadCreateScript(); setError('생성 스크립트를 다운로드했습니다. 외부 DB에서 실행한 뒤 다시 등록하세요.') } catch (downloadError) { setError((downloadError as Error).message) } } else setError(message) } }
   const nameRules = informaticaNameRules(form.system_cd, form.instance_div_cd)
   const registrableTables = filteredTables.filter((table: any) => !isRegistered(table))
@@ -658,9 +658,10 @@ function Pagination({ page, pageCount, pageSize, setPage, setPageSize, ariaLabel
 function Loading(){return <div className="loading"><RefreshCw className="spin"/>불러오는 중...</div>}
 
 export default function App() {
-  const [user,setUser]=useState<User|null>(null); const [checking,setChecking]=useState(true); const [page,setPage]=useState<Page>(()=>(location.hash.slice(1) as Page)||'dashboard'); const [mobile,setMobile]=useState(false); const [toast,setToast]=useState(''); const [passwordOpen,setPasswordOpen]=useState(false)
+  const [user,setUser]=useState<User|null>(null); const [checking,setChecking]=useState(true); const [loginNotice,setLoginNotice]=useState(''); const [page,setPage]=useState<Page>(()=>(location.hash.slice(1) as Page)||'dashboard'); const [mobile,setMobile]=useState(false); const [toast,setToast]=useState(''); const [passwordOpen,setPasswordOpen]=useState(false)
+  useEffect(()=>{const handle=(event: Event)=>{const detail=(event as CustomEvent<{message?:string}>).detail;setLoginNotice(detail?.message||'세션이 만료되었습니다. 다시 로그인해 주세요.');setUser(null);setChecking(false)};window.addEventListener('metavault:session-expired',handle);return()=>window.removeEventListener('metavault:session-expired',handle)},[])
   useEffect(()=>{const token=localStorage.getItem('metavault_token');if(!token){setChecking(false);return}api<User>('/api/auth/me').then(setUser).catch(()=>localStorage.removeItem('metavault_token')).finally(()=>setChecking(false))},[])
-  useEffect(()=>{location.hash=page},[page]); if(checking)return <Loading/>; if(!user)return <Login onLogin={setUser}/>
+  useEffect(()=>{location.hash=page},[page]); if(checking)return <Loading/>; if(!user)return <Login notice={loginNotice} onLogin={next=>{setLoginNotice('');setUser(next)}}/>
   const visible=nav.filter(n=>user.menus.includes(n.id)||user.permissions.includes('admin:*')||user.roles.includes('시스템 관리자')); const select=(p:Page)=>{setPage(p);setMobile(false)}; const groups=[...new Set(visible.map(n=>n.group))]
   const logout=()=>{localStorage.removeItem('metavault_token');setUser(null)}
   return <div className="app-shell"><aside className={`sidebar ${mobile?'mobile-open':''}`}><div className="brand"><div className="brand-mark"><Database size={21}/></div><b>Meta<span>Vault</span></b><button className="sidebar-close" onClick={()=>setMobile(false)}><X/></button></div><nav>{groups.map(group=><div className="nav-group" key={group}><p>{group}</p>{visible.filter(n=>n.group===group).map(item=><button className={page===item.id?'active':''} onClick={()=>select(item.id)} key={item.id}><item.icon size={18}/>{item.label}</button>)}</div>)}</nav><div className="sidebar-foot"><div className="user-mini"><span>{user.name.slice(0,1)}</span><div><b>{user.name}</b><small>{user.roles[0]||'사용자'}</small></div><button onClick={logout} title="로그아웃"><LogOut size={16}/></button></div></div></aside>{mobile&&<div className="mobile-overlay" onClick={()=>setMobile(false)}/>}<main className="workspace"><div className="topbar"><button className="mobile-menu" onClick={()=>setMobile(true)}><MenuIcon/></button><div className="system-state"><i/>시스템 정상</div><div className="top-user"><span>{user.name.slice(0,1)}</span>{user.name}<button className="ghost password-button" onClick={()=>setPasswordOpen(true)} title="비밀번호 변경"><KeyRound size={15}/>비밀번호 변경</button></div></div><div className="content">{page==='dashboard'&&<Dashboard go={select}/>} {page==='sources'&&<Sources toast={setToast}/>} {page==='jobs'&&<Jobs toast={setToast}/>} {page==='metadata'&&<Metadata/>} {page==='registered'&&<RegisteredMetadataPage/>} {page==='users'&&<UsersPage toast={setToast}/>} {page==='roles'&&<RolesPage toast={setToast}/>}</div></main>{toast&&<Toast message={toast} onClose={()=>setToast('')}/>} {passwordOpen&&<PasswordChange onClose={()=>setPasswordOpen(false)}/>}</div>
