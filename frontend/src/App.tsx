@@ -198,7 +198,8 @@ function SourceImportDialog({ onClose, onDone }: { onClose: () => void; onDone: 
     setBusy(true); setError('')
     try {
       const result = await request('/api/sources/import')
-      onDone(`DB 접속 Import 완료: ${result.created}개 등록, ${result.updated}개 수정, ${result.skipped}개 건너뜀`)
+      const check = result.connection_check || { tested: 0, connected: 0, failed: 0 }
+      onDone(`DB 접속 Import 완료: ${result.created}개 등록, ${result.updated}개 수정, ${result.skipped}개 건너뜀 · 자동 연결 확인 ${check.connected}개 성공, ${check.failed}개 실패`)
     } catch (e) { setError((e as Error).message) }
     finally { setBusy(false) }
   }

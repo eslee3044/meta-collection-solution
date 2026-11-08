@@ -6,6 +6,39 @@ from app.schemas import DataSourceIn
 from app.security import decrypt_json, encrypt_json
 
 
+def test_imported_sources_are_tested_and_status_is_updated(monkeypatch):
+    from app.main import _test_imported_sources
+
+    connected = DataSource(name="ok", db_type="postgresql")
+    failed = DataSource(name="bad", db_type="postgresql")
+    sources = {1: connected, 2: failed}
+
+    class Session:
+        def get(self, model, source_id):
+            return sources.get(source_id)
+
+        def commit(self):
+            return None
+
+    def fake_test(source):
+        if source is failed:
+            raise RuntimeError("authentication failed")
+
+    monkeypatch.setattr("app.main.test_source", fake_test)
+    result = _test_imported_sources(Session(), [1, 2])
+
+    assert result == {
+        "tested": 2,
+        "connected": 1,
+        "failed": 1,
+        "errors": [{"source_id": 2, "name": "bad", "error": "authentication failed"}],
+    }
+    assert connected.status == "connected"
+    assert connected.last_tested_at is not None
+    assert failed.status == "failed"
+    assert failed.last_tested_at is not None
+
+
 def test_reentered_password_replaces_unreadable_legacy_secret(monkeypatch):
     source = DataSource(secret_encrypted="legacy-ciphertext")
     payload = DataSourceIn(

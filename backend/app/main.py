@@ -399,6 +399,27 @@ def _preview_source_item(item: dict[str, Any]) -> dict[str, Any]:
     return {"name": safe.get("name"), "db_type": safe.get("db_type"), "host": safe.get("host"), "port": safe.get("port"), "database": safe.get("database"), "username": safe.get("username"), "ssh_enabled": bool(safe.get("ssh_enabled") or (safe.get("ssh") or {}).get("enabled"))}
 
 
+def _test_imported_sources(session: Session, source_ids: list[int]) -> dict[str, Any]:
+    result = {"tested": 0, "connected": 0, "failed": 0, "errors": []}
+    tested_at = datetime.now(timezone.utc)
+    for source_id in source_ids:
+        source = session.get(DataSource, source_id)
+        if not source:
+            continue
+        result["tested"] += 1
+        source.last_tested_at = tested_at
+        try:
+            test_source(source)
+            source.status = "connected"
+            result["connected"] += 1
+        except Exception as exc:
+            source.status = "failed"
+            result["failed"] += 1
+            result["errors"].append({"source_id": source_id, "name": source.name, "error": str(exc)[:500]})
+    session.commit()
+    return result
+
+
 @app.post("/api/sources/import/preview")
 async def preview_sources_import(file: UploadFile = File(...), _: User = Depends(require("sources:write"))):
     items = _parse_source_import(file.filename or "connections.yaml", await file.read())
@@ -418,6 +439,7 @@ async def preview_sources_import(file: UploadFile = File(...), _: User = Depends
 async def import_sources(file: UploadFile = File(...), duplicate: str = Query("skip", pattern="^(skip|overwrite|rename)$"), session: Session = Depends(get_session), _: User = Depends(require("sources:write"))):
     items = _parse_source_import(file.filename or "connections.yaml", await file.read())
     result = {"created": 0, "updated": 0, "skipped": 0, "errors": []}
+    imported_source_ids: list[int] = []
     for index, raw in enumerate(items, start=1):
         try:
             if isinstance(raw.get("ssh"), dict):
@@ -429,6 +451,7 @@ async def import_sources(file: UploadFile = File(...), duplicate: str = Query("s
                 continue
             if existing and duplicate == "overwrite":
                 apply_source(existing, payload)
+                imported_source_ids.append(existing.id)
                 result["updated"] += 1
                 continue
             if existing and duplicate == "rename":
@@ -440,10 +463,13 @@ async def import_sources(file: UploadFile = File(...), duplicate: str = Query("s
             item = DataSource()
             apply_source(item, payload)
             session.add(item)
+            session.flush()
+            imported_source_ids.append(item.id)
             result["created"] += 1
         except Exception as exc:
             result["errors"].append({"row": index, "error": str(exc)[:500]})
     session.commit()
+    result["connection_check"] = _test_imported_sources(session, imported_source_ids)
     return result
 
 
