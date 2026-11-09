@@ -456,7 +456,10 @@ def collect_schema(
                 emit(phase, "running", f"{schema_name} 뷰 수집을 시작합니다.", {"schema": schema_name})
                 view_names = _source_view_names(connection, inspector, source, schema_name) if "VIEW" in items else []
                 for view_name in view_names:
-                    schema["views"].append({"name": view_name, "definition": _safe(lambda: inspector.get_view_definition(view_name, schema=schema_name), None), "permissions": permissions.get(view_name, permissions.get("*", {"select": None, "privileges": [], "checked_as": "not_collected"}))})
+                    view_columns = _safe(lambda: _source_columns(connection, inspector, source, schema_name, view_name), [])
+                    for column in view_columns:
+                        column["type"] = str(column["type"])
+                    schema["views"].append({"name": view_name, "columns": view_columns, "definition": _safe(lambda: inspector.get_view_definition(view_name, schema=schema_name), None), "permissions": permissions.get(view_name, permissions.get("*", {"select": None, "privileges": [], "checked_as": "not_collected"}))})
                     count += 1
                 diagnostic["steps"].append({"step": phase, "status": "success" if "VIEW" in items else "skipped", "count": len(view_names)})
                 emit(phase, "success" if "VIEW" in items else "skipped", f"{schema_name} 뷰 수집을 완료했습니다.", {"count": len(view_names)})

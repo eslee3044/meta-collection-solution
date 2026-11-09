@@ -130,6 +130,20 @@ def test_sqlite_storage_and_growth_collection(tmp_path: Path):
     assert current["storage_summary"]["comparable_tables"] == 1
 
 
+def test_sqlite_view_collection_includes_columns(tmp_path: Path):
+    db_path = tmp_path / "view_columns.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE orders (id INTEGER PRIMARY KEY, total INTEGER)"))
+        connection.execute(text("CREATE VIEW order_summary AS SELECT id, total FROM orders"))
+
+    source = DataSource(name="view-columns", db_type="sqlite", database=str(db_path), host="", username="")
+    payload, _, _ = collect_schema(source, selected_items=["VIEW"])
+
+    view = payload["schemas"][0]["views"][0]
+    assert view["name"] == "order_summary"
+    assert [column["name"] for column in view["columns"]] == ["id", "total"]
+
 def test_docker_supports_sql_server_and_oracle(monkeypatch):
     monkeypatch.setattr("app.capabilities.get_settings", lambda: type("Settings", (), {"deployment_mode": "docker"})())
     assert "mssql" in supported_db_types()
