@@ -1024,8 +1024,20 @@ def _target_table_name(table_name: str, suffix: object) -> str:
     return f"{table_name}_{normalized_suffix.lstrip('_')}"
 
 
+def _snapshot_objects(payload: dict) -> dict[str, tuple[str, dict, str]]:
+    objects: dict[str, tuple[str, dict, str]] = {}
+    for schema in payload.get("schemas", []):
+        schema_name = schema.get("name", "")
+        for table in schema.get("tables", []):
+            objects[table["name"]] = (schema_name, table, "TABLE")
+        for view in schema.get("views", []):
+            view_name = view["name"]
+            objects.setdefault(view_name, (schema_name, view, "VIEW"))
+    return objects
+
+
 def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapshot, source: DataSource, config: MetaTableConfig) -> tuple[int, int]:
-    available = {table["name"]: (schema["name"], table) for schema in snapshot.payload.get("schemas", []) for table in schema.get("tables", [])}
+    available = _snapshot_objects(snapshot.payload)
     selected = set(payload.table_names)
     missing = sorted(selected - available.keys())
     if missing:
@@ -1050,12 +1062,12 @@ def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapsho
             table_count = column_count = 0
             source_database = snapshot.payload.get("database") or ""
             for table_name in payload.table_names:
-                owner, table = available[table_name]
+                owner, table, object_type = available[table_name]
                 table_key = {"system_cd": payload.system_cd, "instance_name": snapshot.payload.get("source", ""), "postfix": payload.postfix, "owner": owner, "table_name": table_name}
                 target_name = _target_table_name(table_name, payload.target_name_suffix)
                 rules = _informatica_name_rules(payload.system_cd, payload.instance_div_cd)
                 table_comment = (payload.table_comments or {}).get(table_name, table.get("comment") or "")
-                values = {**table_key, "database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": "TABLE", "partition_col_modifiable_yn": "Y"}
+                values = {**table_key, "database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "partition_col_modifiable_yn": "Y"}
                 values = {name: value for name, value in values.items() if name in table_columns}
                 where = and_(*[table_columns[key] == table_key[key] for key in table_keys])
                 if connection.execute(select(tables).where(where)).first():
@@ -1101,14 +1113,14 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
         table_count, column_count = _register_metadata_external(payload, snapshot, source, config)
         return {"tables": table_count, "columns": column_count, "schema": config.schema_name, "status": "registered", "target": "external"}
     selected = set(payload.table_names)
-    available = {table["name"]: (schema["name"], table) for schema in snapshot.payload.get("schemas", []) for table in schema.get("tables", [])}
+    available = _snapshot_objects(snapshot.payload)
     missing = sorted(selected - available.keys())
     if missing:
         raise HTTPException(400, f"수집 결과에 없는 테이블이 포함되어 있습니다: {', '.join(missing[:10])}")
     source_database = snapshot.payload.get("database") or ""
     table_count = column_count = 0
     for table_name in payload.table_names:
-        schema_name, table = available[table_name]
+        schema_name, table, object_type = available[table_name]
         target_name = _target_table_name(table_name, payload.target_name_suffix)
         rules = _informatica_name_rules(payload.system_cd, payload.instance_div_cd)
         table_comment = (payload.table_comments or {}).get(table_name, table.get("comment") or "")
@@ -1117,7 +1129,7 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
         if not target:
             target = MetaTableExt(**table_key)
             session.add(target)
-        for key, value in {"database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": "TABLE", "partition_col_modifiable_yn": "Y"}.items():
+        for key, value in {"database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "partition_col_modifiable_yn": "Y"}.items():
             setattr(target, key, value)
         table_count += 1
         pk_names = set((table.get("primary_key") or {}).get("constrained_columns") or [])
@@ -1218,7 +1230,7 @@ def registered_metadata(
     for column in columns:
         key = (column.system_cd, column.instance_name, column.postfix, column.owner, column.table_name)
         grouped.setdefault(key, []).append({"column_name": column.column_name, "column_id": column.column_id, "data_type": column.data_type, "data_length": column.data_length, "data_precision": column.data_precision, "data_scale": column.data_scale, "null_yn": column.null_yn, "pk_yn": column.pk_yn, "partition_key_yn": column.partition_key_yn, "update_base_yn": column.update_base_yn, "comments": column.comments})
-    items = [{"system_cd": table.system_cd, "instance_name": table.instance_name, "postfix": table.postfix, "owner": table.owner, "table_name": table.table_name, "database_name": table.database_name, "etl_conn_div_cd": table.etl_conn_div_cd, "etl_conn_nm": table.etl_conn_nm, "tgt_ds_cd": table.tgt_ds_cd, "tgt_table_name": table.tgt_table_name, "tgt_database_name": table.tgt_database_name, "comments": table.comments, "columns": grouped.get((table.system_cd, table.instance_name, table.postfix, table.owner, table.table_name), [])} for table in tables]
+    items = [{"system_cd": table.system_cd, "instance_name": table.instance_name, "postfix": table.postfix, "owner": table.owner, "table_name": table.table_name, "table_type": table.table_type or "TABLE", "database_name": table.database_name, "etl_conn_div_cd": table.etl_conn_div_cd, "etl_conn_nm": table.etl_conn_nm, "tgt_ds_cd": table.tgt_ds_cd, "tgt_table_name": table.tgt_table_name, "tgt_database_name": table.tgt_database_name, "comments": table.comments, "columns": grouped.get((table.system_cd, table.instance_name, table.postfix, table.owner, table.table_name), [])} for table in tables]
     sources = sorted({source for source in session.scalars(select(MetaTableExt.instance_name).distinct()).all() if source})
     return {"items": items, "total": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size, "sources": sources, "source_counts": source_counts}
 
