@@ -13,4 +13,5 @@ frontend/vite.config.d.ts
 .eggs/
 *.egg-info/
 .pytest_cache/
-.coverage
+*.coverage
+datalake/

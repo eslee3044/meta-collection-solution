@@ -32,8 +32,10 @@ services:
       METAVAULT_CORS_ORIGINS: http://localhost:8090
       METAVAULT_DEPLOYMENT_MODE: docker
       METAVAULT_COLLECTION_WORKERS: ${METAVAULT_COLLECTION_WORKERS:-8}
+      METAVAULT_DATALAKE_ROOT: /var/lib/metavault/datalake
     volumes:
       - ./sample:/app/sample:ro
+      - ./datalake:/var/lib/metavault/datalake
     ports:
       - "8000:8000"
     healthcheck:
@@ -65,8 +67,10 @@ services:
       METAVAULT_WORKER_STALE_MINUTES: ${METAVAULT_WORKER_STALE_MINUTES:-15}
       METAVAULT_WORKER_POLL_SECONDS: ${METAVAULT_WORKER_POLL_SECONDS:-5}
       METAVAULT_RETRY_BASE_SECONDS: ${METAVAULT_RETRY_BASE_SECONDS:-10}
+      METAVAULT_DATALAKE_ROOT: /var/lib/metavault/datalake
     volumes:
       - ./sample:/app/sample:ro
+      - ./datalake:/var/lib/metavault/datalake
   web:
     build: ./frontend
     depends_on:
