@@ -135,6 +135,15 @@ class RunLogOut(BaseModel):
     created_at: datetime
 
 
+class FullLoadIn(BaseModel):
+    job_id: int
+    schema_name: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    table_name: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    key_columns: list[str] = Field(min_length=1)
+    batch_id: str | None = Field(default=None, max_length=120, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    chunk_size: int = Field(default=5000, ge=1, le=100000)
+
+
 class UserIn(BaseModel):
     email: str
     name: str

@@ -20,12 +20,13 @@ from .database import Base, SessionLocal, engine, get_session
 from .dependencies import current_user, require
 from .excel_export import build_schema_workbook, build_sources_workbook
 from .integration import ensure_integration_views, snapshot_diff, snapshot_summary
+from .load_service import run_full_load
 from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaColumnExt, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
 from .capabilities import assert_supported_db_type
 from .collector import available_schema_names, normalize_collection_items, source_engine, test_source
 from .catalog.collection_permissions import check_collection_catalog_permissions
 from .scheduler import enqueue_run, request_run_cancel, start_scheduler, stop_scheduler, sync_jobs
-from .schemas import DataSourceIn, DataSourceOut, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut
+from .schemas import DataSourceIn, DataSourceOut, FullLoadIn, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut
 from .security import create_token, decode_token, decrypt_json, encrypt_json, hash_password, verify_password
 from .seed import seed
 
@@ -692,6 +693,84 @@ def run_job(job_id: int, session: Session = Depends(get_session), _: User = Depe
         raise HTTPException(400, str(exc)) from exc
     run = enqueue_run(session, job_id)
     return {"status": "accepted", "run_id": run.id}
+
+
+@app.post("/api/load/full")
+def full_load(payload: FullLoadIn, session: Session = Depends(get_session), _: User = Depends(require("jobs:write"))):
+    job = session.get(CollectionJob, payload.job_id)
+    if not job:
+        raise HTTPException(404, "수집 작업을 찾을 수 없습니다.")
+    source = session.get(DataSource, job.data_source_id)
+    if not source:
+        raise HTTPException(404, "데이터 소스를 찾을 수 없습니다.")
+
+    now = datetime.now(timezone.utc)
+    run = CollectionRun(
+        job_id=job.id,
+        status="running",
+        current_step="initializing",
+        current_schema=payload.schema_name,
+        started_at=now,
+        heartbeat_at=now,
+        attempt_count=1,
+    )
+    session.add(run)
+    session.flush()
+    batch_id = payload.batch_id or f"load-{run.id}"
+    sequence = 0
+
+    def progress(step: str, details: dict[str, Any]) -> None:
+        nonlocal sequence
+        sequence += 1
+        current = datetime.now(timezone.utc)
+        run.current_step = step
+        run.heartbeat_at = current
+        session.add(RunLog(
+            run_id=run.id,
+            sequence=sequence,
+            level="info",
+            step=step,
+            message=f"Full Load {step} 단계를 실행했습니다.",
+            details=json.dumps(details, ensure_ascii=False, default=str)[:4000],
+        ))
+        session.commit()
+
+    try:
+        session.commit()
+        result = run_full_load(
+            source,
+            schema_name=payload.schema_name,
+            table_name=payload.table_name,
+            key_columns=payload.key_columns,
+            batch_id=batch_id,
+            chunk_size=payload.chunk_size,
+            progress_callback=progress,
+        )
+        now = datetime.now(timezone.utc)
+        run = session.get(CollectionRun, run.id)
+        run.status = "success"
+        run.current_step = "complete"
+        run.object_count = result["l0"]["row_count"]
+        run.finished_at = now
+        run.heartbeat_at = now
+        sequence += 1
+        session.add(RunLog(run_id=run.id, sequence=sequence, level="info", step="complete", message="Full Load가 정상적으로 완료되었습니다.", details=json.dumps({"source_count": result["source_count"], "l0_row_count": result["l0"]["row_count"]}, ensure_ascii=False)))
+        session.commit()
+        return {"run_id": run.id, "status": run.status, "batch_id": batch_id, **result}
+    except Exception as exc:
+        session.rollback()
+        run = session.get(CollectionRun, run.id)
+        if run:
+            now = datetime.now(timezone.utc)
+            run.status = "failed"
+            run.current_step = "failed"
+            run.error_code = "FULL_LOAD_FAILED"
+            run.error_message = str(exc)[:4000]
+            run.finished_at = now
+            run.heartbeat_at = now
+            session.add(RunLog(run_id=run.id, sequence=sequence + 1, level="error", step="failed", message="Full Load 중 오류가 발생했습니다.", details=str(exc)[:4000]))
+            session.commit()
+        raise HTTPException(502, f"Full Load에 실패했습니다: {str(exc)[:500]}") from exc
 
 
 @app.delete("/api/jobs/{job_id}", status_code=204)

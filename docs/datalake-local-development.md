@@ -114,9 +114,16 @@ MetaVault PostgreSQL volume과 Airflow metadata volume은 분리한다. Airflow 
 ```text
 metavault_local_datalake
   ├─ verify_local_datalake
-  ├─ extract_to_st       # 다음 단계에서 원천 Extract 연결
-  ├─ run_dq_checks       # 건수·PK·DQ 연결 예정
-  └─ merge_to_l0         # DuckDB L0 MERGE 연결 예정
+  ├─ full_load_table       # dag_run.conf → MetaVault API
+  └─ finish
 ```
 
-검증용 DAG는 실제 trigger 후 `success` 상태를 확인했다. 현재 적재 Task는 의도적으로 skeleton이며, 원천 행 추출·DQ·L0 MERGE·MetaVault callback 연결은 다음 단계에서 구현한다.
+Full Load 실행 시 `dag_run.conf`에 다음 Manifest를 전달한다.
+
+```json
+{"job_id": 1, "schema_name": "APP", "table_name": "ORDERS", "key_columns": ["ORDER_ID"]}
+```
+
+Airflow Task는 MetaVault API의 `/api/load/full`을 호출하고, API가 기존 `DataSource/source_engine`으로 원천 DB를 읽어 ST Parquet·DQ 기본검증·DuckDB L0 `MERGE`를 수행한다. 실행 결과는 `CollectionRun`과 `RunLog`에 기록한다. SQLite fixture로 API 직접 실행과 Airflow E2E 실행 모두 `success`를 확인했다.
+
+현재는 Full Load 1개 테이블 수직 슬라이스다. 다음 확장 대상은 Incremental watermark, 다중 테이블 Manifest, 상세 DQ, Load Run 전용 모델, MetaVault callback/알림이다.

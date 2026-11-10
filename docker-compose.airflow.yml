@@ -29,6 +29,9 @@ services:
       AIRFLOW_UID: "${AIRFLOW_UID:-50000}"
       _AIRFLOW_WWW_USER_USERNAME: "${AIRFLOW_ADMIN_USERNAME:-admin}"
       _AIRFLOW_WWW_USER_PASSWORD: "${METAVAULT_ADMIN_PASSWORD:?METAVAULT_ADMIN_PASSWORD must be set}"
+      METAVAULT_API_URL: "http://api:8000"
+      METAVAULT_ADMIN_EMAIL: "${METAVAULT_ADMIN_EMAIL:?METAVAULT_ADMIN_EMAIL must be set}"
+      METAVAULT_ADMIN_PASSWORD: "${METAVAULT_ADMIN_PASSWORD:?METAVAULT_ADMIN_PASSWORD must be set}"
     volumes: &airflow-volumes
       - ./airflow/dags:/opt/airflow/dags:ro
       - ./airflow/logs:/opt/airflow/logs
