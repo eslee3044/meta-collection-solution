@@ -21,6 +21,13 @@ def test_database_components_encode_special_characters_in_password():
     assert settings.database_url == "postgresql+psycopg://meta_runtime:abc123%40@db.example.com:5432/metavault"
 
 
+def test_optional_database_ports_accept_empty_environment_values():
+    settings = Settings(database_port="", datalake_postgres_port="")
+
+    assert settings.database_port is None
+    assert settings.datalake_postgres_port is None
+
+
 def test_docker_settings_reject_insecure_bootstrap_values():
     with pytest.raises(ValueError, match="SECRET_KEY"):
         Settings(

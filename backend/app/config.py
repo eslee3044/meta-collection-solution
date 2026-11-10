@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from sqlalchemy.engine import URL
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -38,6 +38,11 @@ class Settings(BaseSettings):
         env_prefix="METAVAULT_",
         extra="ignore",
     )
+
+    @field_validator("database_port", "datalake_postgres_port", mode="before")
+    @classmethod
+    def normalize_empty_ports(cls, value):
+        return None if value == "" else value
 
     @model_validator(mode="after")
     def build_database_url(self):
