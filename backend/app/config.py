@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     worker_poll_seconds: int = 5
     retry_base_seconds: int = 10
     integration_api_key: str = ""
+    datalake_mode: str = "duckdb_only"
+    datalake_postgres_url: str | None = None
+    datalake_postgres_host: str | None = None
+    datalake_postgres_port: int | None = None
+    datalake_postgres_name: str | None = None
+    datalake_postgres_user: str | None = None
+    datalake_postgres_password: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=(Path(__file__).parents[2] / ".env", Path.cwd() / ".env"),
@@ -71,4 +78,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

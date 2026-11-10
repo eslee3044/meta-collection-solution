@@ -164,3 +164,70 @@ curl -fsS "$BASE_URL/api/datalake/tables/main/orders/preview?limit=100" \
 조회 권한은 `jobs:read`가 필요하고 preview limit은 1~1000행으로 제한된다. 현재 L0 DuckDB가 없으면 테이블 목록은 빈 배열을 반환한다.
 
 현재 Compose는 API의 `8000` 포트를 LAN에 공개한다. 인터넷에 직접 포트포워딩하지 말고 Tailscale/VPN 또는 HTTPS reverse proxy 뒤에서 사용한다. 브라우저에서 다른 도메인으로 호출할 경우 `METAVAULT_CORS_ORIGINS`에 해당 HTTPS origin을 명시한다.
+
+## 멀티엔진 Datalake 구성
+
+현재 구현은 환경 변수로 Data Plane 모드를 선택한다.
+
+```text
+duckdb_only       ST Parquet → DQ → DuckDB L0
+
+dual              ST Parquet → DQ → DuckDB L0 + PostgreSQL L0
+
+postgres_serving  ST Parquet → DQ → PostgreSQL L0/serving
+```
+
+기본값은 기존 호환성을 위해 `duckdb_only`다.
+
+```yaml
+METAVAULT_DATALAKE_MODE=duckdb_only
+```
+
+PostgreSQL 모드를 사용할 때는 Data Plane PostgreSQL 연결을 별도로 지정한다. 연결 문자열 또는 host/port/name/user/password 묶음 중 하나를 사용한다. 비밀번호는 Git에 커밋하지 않고 `.env`에만 둔다.
+
+```yaml
+METAVAULT_DATALAKE_MODE=dual
+METAVAULT_DATALAKE_POSTGRES_HOST=datalake-postgres
+METAVAULT_DATALAKE_POSTGRES_PORT=5432
+METAVAULT_DATALAKE_POSTGRES_NAME=metavault_data
+METAVAULT_DATALAKE_POSTGRES_USER=metavault_dp
+METAVAULT_DATALAKE_POSTGRES_PASSWORD=[REDACTED]
+```
+
+Full Load의 공통 흐름은 다음과 같다.
+
+```text
+원천 DB
+  → ST Parquet
+  → DQ
+  ├─ 실패: quarantine Parquet, L0 미반영
+  └─ 성공:
+       ├─ DuckDBAdapter
+       └─ PostgreSQLAdapter
+```
+
+두 엔진은 같은 ST Parquet를 읽으며 원천 DB를 두 번 조회하지 않는다. PostgreSQL adapter는 대상 schema/table을 만들고 PK 기반 `ON CONFLICT DO UPDATE`로 멱등 publish한다. 신규 컬럼은 PostgreSQL 테이블에 추가된다.
+
+PostgreSQL Data Plane을 별도 컨테이너로 운영하려면 별도 Compose override를 사용한다. 이 서비스는 기존 `metavault-postgres-data` volume을 사용하지 않아 Control Plane 데이터를 건드리지 않는다.
+
+```text
+Control Plane PostgreSQL
+  └─ metavault-postgres-data
+
+Data Plane PostgreSQL
+  └─ metavault-datalake-postgres-data
+```
+
+현재 PostgreSQL adapter는 백엔드 코드와 환경 설정을 제공하며, 기본 Compose는 기존 운영 호환성을 위해 DuckDB 모드로 유지한다. 운영 전환 전에는 `dual` 모드로 row count, PK, DQ 결과, 재실행 결과를 대조한 뒤 `postgres_serving`을 선택한다.
+
+DBeaver에서는 Data Plane PostgreSQL에 다음처럼 접속한다. 비밀번호는 맥미니의 `.env`에서 확인하며 채팅이나 Git에는 기록하지 않는다.
+
+```text
+Host: 100.107.26.73
+Port: 5434
+Database: metavault_data
+Username: metavault_dp
+SSL: off (Tailscale 내부망에서만 접근)
+```
+
+호스트의 Tailscale IP가 바뀌면 `.env`의 `METAVAULT_DATALAKE_DB_BIND_IP`를 현재 Tailscale IP로 변경하고 Data Plane PostgreSQL 컨테이너만 재생성한다. 사내 LAN에서도 접근해야 하는 경우에만 이 값을 `0.0.0.0`으로 명시한다.

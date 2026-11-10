@@ -1,0 +1,43 @@
+services:
+  datalake-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: "${METAVAULT_DATALAKE_DB_NAME:-metavault_data}"
+      POSTGRES_USER: "${METAVAULT_DATALAKE_DB_USER:-metavault_dp}"
+      POSTGRES_PASSWORD: "${METAVAULT_DATALAKE_DB_PASSWORD:?METAVAULT_DATALAKE_DB_PASSWORD must be set}"
+    ports:
+      - "${METAVAULT_DATALAKE_DB_BIND_IP:-100.107.26.73}:${METAVAULT_DATALAKE_DB_HOST_PORT:-5434}:5432"
+    volumes:
+      - metavault-datalake-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    depends_on:
+      datalake-postgres:
+        condition: service_healthy
+    environment:
+      METAVAULT_DATALAKE_MODE: "${METAVAULT_DATALAKE_MODE:-dual}"
+      METAVAULT_DATALAKE_POSTGRES_HOST: datalake-postgres
+      METAVAULT_DATALAKE_POSTGRES_PORT: 5432
+      METAVAULT_DATALAKE_POSTGRES_NAME: "${METAVAULT_DATALAKE_DB_NAME:-metavault_data}"
+      METAVAULT_DATALAKE_POSTGRES_USER: "${METAVAULT_DATALAKE_DB_USER:-metavault_dp}"
+      METAVAULT_DATALAKE_POSTGRES_PASSWORD: "${METAVAULT_DATALAKE_DB_PASSWORD:?METAVAULT_DATALAKE_DB_PASSWORD must be set}"
+
+  worker:
+    depends_on:
+      datalake-postgres:
+        condition: service_healthy
+    environment:
+      METAVAULT_DATALAKE_MODE: "${METAVAULT_DATALAKE_MODE:-dual}"
+      METAVAULT_DATALAKE_POSTGRES_HOST: datalake-postgres
+      METAVAULT_DATALAKE_POSTGRES_PORT: 5432
+      METAVAULT_DATALAKE_POSTGRES_NAME: "${METAVAULT_DATALAKE_DB_NAME:-metavault_data}"
+      METAVAULT_DATALAKE_POSTGRES_USER: "${METAVAULT_DATALAKE_DB_USER:-metavault_dp}"
+      METAVAULT_DATALAKE_POSTGRES_PASSWORD: "${METAVAULT_DATALAKE_DB_PASSWORD:?METAVAULT_DATALAKE_DB_PASSWORD must be set}"
+
+volumes:
+  metavault-datalake-postgres-data:

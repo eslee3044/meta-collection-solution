@@ -8,7 +8,9 @@ from sqlalchemy import MetaData, Table, select
 from sqlalchemy.engine import Connection
 
 from .collector import source_engine
+from .config import get_settings
 from .datalake import DataQualityError, merge_parquet_to_l0, quarantine_parquet, run_dq_checks, write_staging_parquet
+from .datalake_postgres import publish_parquet_to_postgres
 from .models import DataSource
 
 
@@ -69,13 +71,42 @@ def run_full_load(
         quarantine_path = quarantine_parquet(staging_path, root=root)
         dq["quarantine_path"] = str(quarantine_path)
         raise DataQualityError(dq)
-    l0 = merge_parquet_to_l0(
-        staging_path,
-        schema_name=schema_name,
-        table_name=table_name,
-        key_columns=key_columns,
-        root=root,
-    )
-    if progress_callback:
-        progress_callback("merge", {"row_count": l0["row_count"], "table": l0["table"]})
-    return {"source_count": count, "staging_path": str(staging_path), "dq": dq, "l0": l0}
+    mode = get_settings().datalake_mode.lower().strip()
+    if mode not in {"duckdb_only", "dual", "postgres_serving"}:
+        raise ValueError("METAVAULT_DATALAKE_MODE must be duckdb_only, dual, or postgres_serving")
+
+    l0: dict[str, Any]
+    if mode in {"duckdb_only", "dual"}:
+        l0 = merge_parquet_to_l0(
+            staging_path,
+            schema_name=schema_name,
+            table_name=table_name,
+            key_columns=key_columns,
+            root=root,
+        )
+        if progress_callback:
+            progress_callback("merge", {"engine": "duckdb", "row_count": l0["row_count"], "table": l0["table"]})
+    else:
+        l0 = {"engine": "postgresql", "table": f"{schema_name}.{table_name}"}
+
+    postgres = None
+    if mode in {"dual", "postgres_serving"}:
+        postgres = publish_parquet_to_postgres(
+            staging_path,
+            schema_name=schema_name,
+            table_name=table_name,
+            key_columns=list(key_columns),
+        )
+        if mode == "postgres_serving":
+            l0 = postgres
+        if progress_callback:
+            progress_callback("postgres_publish", postgres)
+
+    return {
+        "source_count": count,
+        "staging_path": str(staging_path),
+        "dq": dq,
+        "l0": l0,
+        "data_plane_mode": mode,
+        "postgres": postgres,
+    }
