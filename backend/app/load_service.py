@@ -27,6 +27,7 @@ def run_full_load(
     source: DataSource,
     *,
     schema_name: str,
+    source_schema_name: str | None = None,
     table_name: str,
     key_columns: Sequence[str],
     batch_id: str,
@@ -39,9 +40,10 @@ def run_full_load(
         raise ValueError("chunk_size must be positive")
     count = 0
     metadata = MetaData()
+    source_schema = source_schema_name or schema_name
     with source_engine(source) as engine:
         with engine.connect() as connection:
-            source_table = Table(table_name, metadata, schema=schema_name, autoload_with=connection)
+            source_table = Table(table_name, metadata, schema=source_schema, autoload_with=connection)
 
             def rows() -> Iterable[Mapping[str, Any]]:
                 nonlocal count

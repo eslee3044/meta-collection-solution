@@ -742,6 +742,7 @@ def full_load(payload: FullLoadIn, session: Session = Depends(get_session), _: U
         result = run_full_load(
             source,
             schema_name=payload.schema_name,
+            source_schema_name=payload.source_schema_name,
             table_name=payload.table_name,
             key_columns=payload.key_columns,
             batch_id=batch_id,

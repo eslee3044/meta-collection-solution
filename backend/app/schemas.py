@@ -138,6 +138,7 @@ class RunLogOut(BaseModel):
 class FullLoadIn(BaseModel):
     job_id: int
     schema_name: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    source_schema_name: str | None = Field(default=None, max_length=255, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
     table_name: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
     key_columns: list[str] = Field(min_length=1)
     batch_id: str | None = Field(default=None, max_length=120, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
