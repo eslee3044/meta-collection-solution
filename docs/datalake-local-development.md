@@ -135,3 +135,32 @@ duplicate key row count == 0
 DQ를 통과한 경우에만 DuckDB L0 `MERGE`를 수행한다. 실패한 ST 파일은 `datalake/quarantine/`에 복사하고 L0에는 반영하지 않는다. 결과와 DQ 수치는 `CollectionRun`과 `RunLog`에 기록한다. SQLite fixture로 API 직접 실행과 Airflow E2E 실행, DQ 성공·실패 경로를 확인했다.
 
 현재는 Full Load 1개 테이블 수직 슬라이스다. 다음 확장 대상은 Incremental watermark, 다중 테이블 Manifest, 상세 DQ, Load Run 전용 모델, MetaVault callback/알림이다.
+
+## 외부 Datalake 조회 API
+
+Datalake 파일 경로를 외부에 직접 공유하지 않고, MetaVault JWT 인증이 필요한 읽기 전용 API를 사용한다.
+
+```text
+GET http://<맥미니-IP>:8000/api/datalake/tables
+GET http://<맥미니-IP>:8000/api/datalake/tables/{schema}/{table}/preview?limit=100
+```
+
+예시:
+
+```bash
+BASE_URL=http://192.168.0.20:8000
+TOKEN=$(curl -fsS -X POST "$BASE_URL/api/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$METAVAULT_ADMIN_EMAIL\",\"password\":\"$METAVAULT_ADMIN_PASSWORD\"}" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+
+curl -fsS "$BASE_URL/api/datalake/tables" \
+  -H "Authorization: Bearer $TOKEN"
+
+curl -fsS "$BASE_URL/api/datalake/tables/main/orders/preview?limit=100" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+조회 권한은 `jobs:read`가 필요하고 preview limit은 1~1000행으로 제한된다. 현재 L0 DuckDB가 없으면 테이블 목록은 빈 배열을 반환한다.
+
+현재 Compose는 API의 `8000` 포트를 LAN에 공개한다. 인터넷에 직접 포트포워딩하지 말고 Tailscale/VPN 또는 HTTPS reverse proxy 뒤에서 사용한다. 브라우저에서 다른 도메인으로 호출할 경우 `METAVAULT_CORS_ORIGINS`에 해당 HTTPS origin을 명시한다.

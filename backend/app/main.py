@@ -20,6 +20,8 @@ from .database import Base, SessionLocal, engine, get_session
 from .dependencies import current_user, require
 from .excel_export import build_schema_workbook, build_sources_workbook
 from .integration import ensure_integration_views, snapshot_diff, snapshot_summary
+from .datalake import datalake_root
+from .datalake_query import DatalakeTableNotFound, list_l0_tables, preview_l0_table
 from .load_service import run_full_load
 from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaColumnExt, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
 from .capabilities import assert_supported_db_type
@@ -771,6 +773,26 @@ def full_load(payload: FullLoadIn, session: Session = Depends(get_session), _: U
             session.add(RunLog(run_id=run.id, sequence=sequence + 1, level="error", step="failed", message="Full Load 중 오류가 발생했습니다.", details=str(exc)[:4000]))
             session.commit()
         raise HTTPException(502, f"Full Load에 실패했습니다: {str(exc)[:500]}") from exc
+
+
+@app.get("/api/datalake/tables")
+def list_datalake_tables(_: User = Depends(require("jobs:read"))):
+    return {"tables": list_l0_tables(datalake_root())}
+
+
+@app.get("/api/datalake/tables/{schema_name}/{table_name}/preview")
+def preview_datalake_table(
+    schema_name: str,
+    table_name: str,
+    limit: int = Query(default=100, ge=1, le=1000),
+    _: User = Depends(require("jobs:read")),
+):
+    try:
+        return preview_l0_table(datalake_root(), schema_name, table_name, limit=limit)
+    except DatalakeTableNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.delete("/api/jobs/{job_id}", status_code=204)
