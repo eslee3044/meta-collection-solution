@@ -275,7 +275,7 @@ def apply_source(item: DataSource, payload: DataSourceIn) -> None:
 
 
 @app.get("/api/meta-table-config", response_model=MetaTableConfigOut)
-def get_meta_table_config(session: Session = Depends(get_session), _: User = Depends(require("sources:read"))):
+def get_meta_table_config(session: Session = Depends(get_session), _: User = Depends(require("admin:*"))):
     config = session.get(MetaTableConfig, 1)
     if not config:
         config = MetaTableConfig(id=1)
@@ -301,7 +301,7 @@ def _check_external_meta_tables(source: DataSource, config: MetaTableConfig) -> 
 
 
 @app.get("/api/meta-table-config/status")
-def meta_table_config_status(session: Session = Depends(get_session), _: User = Depends(require("sources:read"))):
+def meta_table_config_status(session: Session = Depends(get_session), _: User = Depends(require("admin:*"))):
     config = session.get(MetaTableConfig, 1)
     if not config or config.source_type != "external":
         return {"status": "ready", "source_type": "internal", "missing_tables": []}
@@ -318,7 +318,7 @@ def meta_table_config_status(session: Session = Depends(get_session), _: User = 
 
 
 @app.put("/api/meta-table-config", response_model=MetaTableConfigOut)
-def update_meta_table_config(payload: MetaTableConfigIn, session: Session = Depends(get_session), _: User = Depends(require("sources:write"))):
+def update_meta_table_config(payload: MetaTableConfigIn, session: Session = Depends(get_session), _: User = Depends(require("admin:*"))):
     identifier = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]*$")
     for value, label in ((payload.schema_name, "스키마명"), (payload.tables_table_name, "테이블명"), (payload.columns_table_name, "테이블명")):
         if not identifier.fullmatch(value):
