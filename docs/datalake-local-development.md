@@ -86,3 +86,37 @@ result = merge_parquet_to_l0(
 Local Parquet + DuckDB
   → GCS Parquet + BigQuery
 ```
+
+## Airflow 로컬 구성
+
+Airflow는 별도 override 파일로 구성한다.
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.airflow.yml \
+  up -d airflow-postgres airflow-init airflow-scheduler airflow-webserver
+```
+
+구성은 다음과 같다.
+
+```text
+airflow-postgres = Airflow metadata 전용 DB
+airflow-scheduler = DAG 스케줄·Task 실행 조정
+LocalExecutor = 맥미니 단일 호스트 실행기
+airflow-webserver = http://127.0.0.1:8085
+```
+
+MetaVault PostgreSQL volume과 Airflow metadata volume은 분리한다. Airflow metadata DB는 호스트 포트를 공개하지 않고 Docker 내부 네트워크에서만 접근한다.
+
+현재 DAG:
+
+```text
+metavault_local_datalake
+  ├─ verify_local_datalake
+  ├─ extract_to_st       # 다음 단계에서 원천 Extract 연결
+  ├─ run_dq_checks       # 건수·PK·DQ 연결 예정
+  └─ merge_to_l0         # DuckDB L0 MERGE 연결 예정
+```
+
+검증용 DAG는 실제 trigger 후 `success` 상태를 확인했다. 현재 적재 Task는 의도적으로 skeleton이며, 원천 행 추출·DQ·L0 MERGE·MetaVault callback 연결은 다음 단계에서 구현한다.

@@ -15,3 +15,5 @@ frontend/vite.config.d.ts
 .pytest_cache/
 *.coverage
 datalake/
+airflow/logs/
+airflow/plugins/__pycache__/
