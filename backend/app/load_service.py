@@ -8,7 +8,7 @@ from sqlalchemy import MetaData, Table, select
 from sqlalchemy.engine import Connection
 
 from .collector import source_engine
-from .datalake import merge_parquet_to_l0, write_staging_parquet
+from .datalake import DataQualityError, merge_parquet_to_l0, quarantine_parquet, run_dq_checks, write_staging_parquet
 from .models import DataSource
 
 
@@ -62,6 +62,13 @@ def run_full_load(
         raise ValueError("source table is empty")
     if progress_callback:
         progress_callback("staging", {"row_count": count, "path": str(staging_path)})
+    dq = run_dq_checks(staging_path, key_columns=key_columns, expected_source_count=count)
+    if progress_callback:
+        progress_callback("dq", dq)
+    if not dq["passed"]:
+        quarantine_path = quarantine_parquet(staging_path, root=root)
+        dq["quarantine_path"] = str(quarantine_path)
+        raise DataQualityError(dq)
     l0 = merge_parquet_to_l0(
         staging_path,
         schema_name=schema_name,
@@ -71,4 +78,4 @@ def run_full_load(
     )
     if progress_callback:
         progress_callback("merge", {"row_count": l0["row_count"], "table": l0["table"]})
-    return {"source_count": count, "staging_path": str(staging_path), "l0": l0}
+    return {"source_count": count, "staging_path": str(staging_path), "dq": dq, "l0": l0}

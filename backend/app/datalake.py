@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -85,6 +86,63 @@ def write_staging_parquet(
     finally:
         input_path.unlink(missing_ok=True)
     return output
+
+
+def run_dq_checks(
+    parquet_path: Path,
+    *,
+    key_columns: Sequence[str],
+    expected_source_count: int | None = None,
+) -> dict[str, Any]:
+    """Run deterministic row-count and key-integrity checks on a ST batch."""
+    source_path = Path(parquet_path).resolve()
+    if not source_path.is_file() or source_path.suffix.lower() != ".parquet":
+        raise ValueError("parquet_path must point to an existing .parquet file")
+    keys = [_identifier(column, "key column") for column in key_columns]
+    if not keys:
+        raise ValueError("at least one key column is required for DQ checks")
+
+    connection = duckdb.connect()
+    try:
+        columns = {row[0] for row in connection.execute("DESCRIBE SELECT * FROM read_parquet(?)", [str(source_path)]).fetchall()}
+        missing = [key for key in keys if key not in columns]
+        if missing:
+            raise ValueError(f"key columns are missing from staging parquet: {missing}")
+        staging_count = int(connection.execute("SELECT COUNT(*) FROM read_parquet(?)", [str(source_path)]).fetchone()[0])
+        null_condition = " OR ".join(f"{_quote(key, 'key column')} IS NULL" for key in keys)
+        null_key_count = int(connection.execute(f"SELECT COUNT(*) FROM read_parquet(?) WHERE {null_condition}", [str(source_path)]).fetchone()[0])
+        group_columns = ", ".join(_quote(key, "key column") for key in keys)
+        duplicate_key_count = int(connection.execute(
+            f"SELECT COALESCE(SUM(group_count - 1), 0) FROM (SELECT COUNT(*) AS group_count FROM read_parquet(?) WHERE NOT ({null_condition}) GROUP BY {group_columns} HAVING COUNT(*) > 1)",
+            [str(source_path)],
+        ).fetchone()[0])
+    finally:
+        connection.close()
+
+    count_match = expected_source_count is None or staging_count == expected_source_count
+    return {
+        "passed": null_key_count == 0 and duplicate_key_count == 0 and count_match,
+        "source_count": expected_source_count,
+        "staging_count": staging_count,
+        "null_key_count": null_key_count,
+        "duplicate_key_count": duplicate_key_count,
+        "count_match": count_match,
+    }
+
+
+class DataQualityError(ValueError):
+    def __init__(self, result: dict[str, Any]):
+        self.result = result
+        super().__init__(f"data quality checks failed: {result}")
+
+
+def quarantine_parquet(parquet_path: Path, *, root: Path | None = None) -> Path:
+    source_path = Path(parquet_path).resolve()
+    quarantine_dir = (root or datalake_root()) / "quarantine"
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    target = quarantine_dir / source_path.name
+    shutil.copy2(source_path, target)
+    return target
 
 
 def merge_parquet_to_l0(

@@ -754,7 +754,7 @@ def full_load(payload: FullLoadIn, session: Session = Depends(get_session), _: U
         run.finished_at = now
         run.heartbeat_at = now
         sequence += 1
-        session.add(RunLog(run_id=run.id, sequence=sequence, level="info", step="complete", message="Full Load가 정상적으로 완료되었습니다.", details=json.dumps({"source_count": result["source_count"], "l0_row_count": result["l0"]["row_count"]}, ensure_ascii=False)))
+        session.add(RunLog(run_id=run.id, sequence=sequence, level="info", step="complete", message="Full Load가 정상적으로 완료되었습니다.", details=json.dumps({"source_count": result["source_count"], "dq": result["dq"], "l0_row_count": result["l0"]["row_count"]}, ensure_ascii=False)))
         session.commit()
         return {"run_id": run.id, "status": run.status, "batch_id": batch_id, **result}
     except Exception as exc:

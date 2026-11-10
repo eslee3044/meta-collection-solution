@@ -124,6 +124,14 @@ Full Load 실행 시 `dag_run.conf`에 다음 Manifest를 전달한다.
 {"job_id": 1, "schema_name": "APP", "table_name": "ORDERS", "key_columns": ["ORDER_ID"]}
 ```
 
-Airflow Task는 MetaVault API의 `/api/load/full`을 호출하고, API가 기존 `DataSource/source_engine`으로 원천 DB를 읽어 ST Parquet·DQ 기본검증·DuckDB L0 `MERGE`를 수행한다. 실행 결과는 `CollectionRun`과 `RunLog`에 기록한다. SQLite fixture로 API 직접 실행과 Airflow E2E 실행 모두 `success`를 확인했다.
+Airflow Task는 MetaVault API의 `/api/load/full`을 호출하고, API가 기존 `DataSource/source_engine`으로 원천 DB를 읽어 ST Parquet를 생성한다. 이후 다음 DQ를 실행한다.
+
+```text
+source_count == staging_count
+NULL key count == 0
+duplicate key row count == 0
+```
+
+DQ를 통과한 경우에만 DuckDB L0 `MERGE`를 수행한다. 실패한 ST 파일은 `datalake/quarantine/`에 복사하고 L0에는 반영하지 않는다. 결과와 DQ 수치는 `CollectionRun`과 `RunLog`에 기록한다. SQLite fixture로 API 직접 실행과 Airflow E2E 실행, DQ 성공·실패 경로를 확인했다.
 
 현재는 Full Load 1개 테이블 수직 슬라이스다. 다음 확장 대상은 Incremental watermark, 다중 테이블 Manifest, 상세 DQ, Load Run 전용 모델, MetaVault callback/알림이다.
