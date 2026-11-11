@@ -1042,7 +1042,7 @@ def _snapshot_objects(payload: dict) -> dict[str, tuple[str, dict, str]]:
     return objects
 
 
-def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapshot, source: DataSource, config: MetaTableConfig) -> tuple[int, int]:
+def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapshot, source: DataSource, config: MetaTableConfig, actor: str) -> tuple[int, int]:
     available = _snapshot_objects(snapshot.payload)
     selected = set(payload.table_names)
     missing = sorted(selected - available.keys())
@@ -1066,6 +1066,7 @@ def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapsho
             if any(key not in table_columns for key in table_keys) or any(key not in column_columns for key in column_keys):
                 raise HTTPException(400, "외부 메타 테이블에 필요한 키 컬럼이 없습니다.")
             table_count = column_count = 0
+            audit_now = datetime.now(timezone.utc)
             source_database = snapshot.payload.get("database") or ""
             for table_name in payload.table_names:
                 owner, table, object_type = available[table_name]
@@ -1073,10 +1074,13 @@ def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapsho
                 target_name = _target_table_name(table_name, payload.target_name_suffix)
                 rules = _informatica_name_rules(payload.system_cd, payload.instance_div_cd)
                 table_comment = (payload.table_comments or {}).get(table_name, table.get("comment") or "")
-                values = {**table_key, "database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "src_data_source_id": snapshot.data_source_id, "src_snapshot_id": snapshot.id, "partition_col_modifiable_yn": "Y"}
+                values = {**table_key, "database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "src_data_source_id": snapshot.data_source_id, "src_snapshot_id": snapshot.id, "createdon": audit_now, "createdby": actor, "lastupdated": audit_now, "updatedby": actor, "partition_col_modifiable_yn": "Y"}
                 values = {name: value for name, value in values.items() if name in table_columns}
                 where = and_(*[table_columns[key] == table_key[key] for key in table_keys])
-                if connection.execute(select(tables).where(where)).first():
+                existing_table = connection.execute(select(tables).where(where)).first()
+                if existing_table:
+                    values.pop("createdon", None)
+                    values.pop("createdby", None)
                     connection.execute(update(tables).where(where).values({table_columns[name]: value for name, value in values.items()}))
                 else:
                     connection.execute(tables.insert().values({table_columns[name]: value for name, value in values.items()}))
@@ -1089,10 +1093,13 @@ def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapsho
                     if not column_name or (payload.columns_by_table is not None and column_name not in set(payload.columns_by_table.get(table_name, []))):
                         continue
                     column_key = {**table_key, "column_name": column_name}
-                    column_values = {**column_key, "src_column_name": column_name, "tgt_column_name": column_name, "column_id": int(column.get("ordinal_position") or position), "data_type": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[0], "data_length": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[1], "data_precision": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[2], "data_scale": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[3], "null_yn": "N" if column.get("nullable") is False else "Y", "pk_yn": "Y" if column_name in pk_names else "N", "partition_key_yn": flag_candidates["partition_key_yn"].get(column_name, "N"), "update_base_yn": flag_candidates["update_base_yn"].get(column_name, "N"), "comments": column.get("comment")}
+                    column_values = {**column_key, "src_column_name": column_name, "tgt_column_name": column_name, "createdon": audit_now, "createdby": actor, "lastupdated": audit_now, "updatedby": actor, "column_id": int(column.get("ordinal_position") or position), "data_type": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[0], "data_length": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[1], "data_precision": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[2], "data_scale": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[3], "null_yn": "N" if column.get("nullable") is False else "Y", "pk_yn": "Y" if column_name in pk_names else "N", "partition_key_yn": flag_candidates["partition_key_yn"].get(column_name, "N"), "update_base_yn": flag_candidates["update_base_yn"].get(column_name, "N"), "comments": column.get("comment")}
                     column_values = {name: value for name, value in column_values.items() if name in column_columns}
                     column_where = and_(*[column_columns[key] == column_key[key] for key in column_keys])
-                    if connection.execute(select(columns).where(column_where)).first():
+                    existing_column = connection.execute(select(columns).where(column_where)).first()
+                    if existing_column:
+                        column_values.pop("createdon", None)
+                        column_values.pop("createdby", None)
                         connection.execute(update(columns).where(column_where).values({column_columns[name]: value for name, value in column_values.items()}))
                     else:
                         connection.execute(columns.insert().values({column_columns[name]: value for name, value in column_values.items()}))
@@ -1105,7 +1112,7 @@ def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapsho
 
 
 @app.post("/api/metadata/register")
-def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_session), _: User = Depends(require("metadata:write"))):
+def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_session), user: User = Depends(require("metadata:write"))):
     snapshot = session.get(SchemaSnapshot, payload.snapshot_id)
     if not snapshot:
         raise HTTPException(404, "선택한 수집 스냅샷을 찾을 수 없습니다.")
@@ -1116,7 +1123,7 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
         source = session.get(DataSource, config.external_source_id)
         if not source:
             raise HTTPException(404, "설정된 외부 DB 접속정보를 찾을 수 없습니다.")
-        table_count, column_count = _register_metadata_external(payload, snapshot, source, config)
+        table_count, column_count = _register_metadata_external(payload, snapshot, source, config, user.email or user.name)
         return {"tables": table_count, "columns": column_count, "schema": config.schema_name, "status": "registered", "target": "external"}
     selected = set(payload.table_names)
     available = _snapshot_objects(snapshot.payload)
@@ -1124,6 +1131,8 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
     if missing:
         raise HTTPException(400, f"수집 결과에 없는 테이블이 포함되어 있습니다: {', '.join(missing[:10])}")
     source_database = snapshot.payload.get("database") or ""
+    audit_now = datetime.now(timezone.utc)
+    audit_actor = user.email or user.name
     table_count = column_count = 0
     for table_name in payload.table_names:
         schema_name, table, object_type = available[table_name]
@@ -1133,9 +1142,9 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
         table_key = {"system_cd": payload.system_cd, "instance_name": snapshot.payload.get("source", ""), "postfix": payload.postfix, "owner": schema_name, "table_name": table_name}
         target = session.get(MetaTableExt, tuple(table_key.values()))
         if not target:
-            target = MetaTableExt(**table_key)
+            target = MetaTableExt(**table_key, createdon=audit_now, createdby=audit_actor)
             session.add(target)
-        for key, value in {"database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "src_data_source_id": snapshot.data_source_id, "src_snapshot_id": snapshot.id, "partition_col_modifiable_yn": "Y"}.items():
+        for key, value in {"database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "src_data_source_id": snapshot.data_source_id, "src_snapshot_id": snapshot.id, "lastupdated": audit_now, "updatedby": audit_actor, "partition_col_modifiable_yn": "Y"}.items():
             setattr(target, key, value)
         table_count += 1
         pk_names = set((table.get("primary_key") or {}).get("constrained_columns") or [])
@@ -1148,11 +1157,13 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
             column_key = {**table_key, "column_name": column_name}
             target_column = session.get(MetaColumnExt, tuple(column_key.values()))
             if not target_column:
-                target_column = MetaColumnExt(**column_key)
+                target_column = MetaColumnExt(**column_key, createdon=audit_now, createdby=audit_actor)
                 session.add(target_column)
             target_column.column_id = int(column.get("ordinal_position") or position)
             target_column.src_column_name = column_name
             target_column.tgt_column_name = column_name
+            target_column.lastupdated = audit_now
+            target_column.updatedby = audit_actor
             target_column.data_type, target_column.data_length, target_column.data_precision, target_column.data_scale = _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))
             target_column.null_yn = "N" if column.get("nullable") is False else "Y"
             target_column.pk_yn = "Y" if column_name in pk_names else "N"
@@ -1286,11 +1297,13 @@ def delete_registered_metadata(payload: dict, session: Session = Depends(get_ses
 
 
 @app.put("/api/metadata/registered")
-def update_registered_metadata(payload: dict, session: Session = Depends(get_session), _: User = Depends(require("metadata:write"))):
+def update_registered_metadata(payload: dict, session: Session = Depends(get_session), user: User = Depends(require("metadata:write"))):
     key = (payload.get("system_cd"), payload.get("instance_name"), payload.get("postfix"), payload.get("owner"), payload.get("table_name"))
     if not all(isinstance(value, str) and value for value in key):
         raise HTTPException(422, "등록 메타의 키 값은 모두 필수입니다.")
     config = session.get(MetaTableConfig, 1)
+    audit_now = datetime.now(timezone.utc)
+    audit_actor = user.email or user.name
     if config and config.source_type == "external":
         source = session.get(DataSource, config.external_source_id) if config.external_source_id else None
         if not source:
@@ -1307,6 +1320,10 @@ def update_registered_metadata(payload: dict, session: Session = Depends(get_ses
                     raise HTTPException(404, "등록된 메타 테이블을 찾을 수 없습니다.")
                 table_fields = ("database_name", "etl_conn_div_cd", "etl_conn_nm", "tgt_ds_cd", "tgt_table_name", "tgt_database_name", "comments", "partition_key_yn", "cluster_key_yn", "update_base_yn", "to_single_byte_yn", "substr_yn")
                 table_values = {field: payload[field] for field in table_fields if field in payload and field in table_columns}
+                if "lastupdated" in table_columns:
+                    table_values["lastupdated"] = audit_now
+                if "updatedby" in table_columns:
+                    table_values["updatedby"] = audit_actor
                 if table_values:
                     connection.execute(update(tables).where(table_where).values({table_columns[field]: value for field, value in table_values.items()}))
                 valid_items = payload.get("columns", [])
@@ -1319,6 +1336,10 @@ def update_registered_metadata(payload: dict, session: Session = Depends(get_ses
                     if column_name not in existing_columns:
                         continue
                     values = {field: item[field] for field in column_fields if field in item and field in column_columns}
+                    if "lastupdated" in column_columns:
+                        values["lastupdated"] = audit_now
+                    if "updatedby" in column_columns:
+                        values["updatedby"] = audit_actor
                     if values:
                         connection.execute(update(columns).where(and_(*[column_columns[name] == value for name, value in {"system_cd": key[0], "instance_name": key[1], "postfix": key[2], "owner": key[3], "table_name": key[4], "column_name": column_name}.items()])).values({column_columns[field]: value for field, value in values.items()}))
                 return {"status": "updated"}
@@ -1334,6 +1355,8 @@ def update_registered_metadata(payload: dict, session: Session = Depends(get_ses
     for field in ("database_name", "etl_conn_div_cd", "etl_conn_nm", "tgt_ds_cd", "tgt_table_name", "tgt_database_name", "comments", "partition_key_yn", "cluster_key_yn", "update_base_yn", "to_single_byte_yn", "substr_yn"):
         if field in payload:
             setattr(table, field, payload[field])
+    table.lastupdated = audit_now
+    table.updatedby = audit_actor
     items = payload.get("columns", [])
     valid_items = []
     for item in items:
@@ -1359,6 +1382,8 @@ def update_registered_metadata(payload: dict, session: Session = Depends(get_ses
         for field in ("column_id", "data_length", "data_precision", "data_scale"):
             if field in item:
                 setattr(column, field, item[field])
+        column.lastupdated = audit_now
+        column.updatedby = audit_actor
     session.commit()
     return {"status": "updated"}
 
