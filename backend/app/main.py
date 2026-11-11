@@ -1258,8 +1258,8 @@ def registered_metadata(
 def delete_registered_metadata(payload: dict, session: Session = Depends(get_session), _: User = Depends(require("metadata:write"))):
     key_names = ("system_cd", "instance_name", "postfix", "owner", "table_name")
     key = {name: payload.get(name) for name in key_names}
-    if not all(isinstance(value, str) and value for value in key.values()):
-        raise HTTPException(422, "삭제할 메타 테이블의 키 값은 모두 필수입니다.")
+    if any(not isinstance(key[name], str) or not key[name] for name in ("system_cd", "instance_name", "owner", "table_name")) or not isinstance(key["postfix"], str):
+        raise HTTPException(422, "삭제할 메타 테이블의 키 값은 올바른 문자열이어야 합니다.")
     config = session.get(MetaTableConfig, 1)
     if config and config.source_type == "external":
         source = session.get(DataSource, config.external_source_id) if config.external_source_id else None
@@ -1299,8 +1299,8 @@ def delete_registered_metadata(payload: dict, session: Session = Depends(get_ses
 @app.put("/api/metadata/registered")
 def update_registered_metadata(payload: dict, session: Session = Depends(get_session), user: User = Depends(require("metadata:write"))):
     key = (payload.get("system_cd"), payload.get("instance_name"), payload.get("postfix"), payload.get("owner"), payload.get("table_name"))
-    if not all(isinstance(value, str) and value for value in key):
-        raise HTTPException(422, "등록 메타의 키 값은 모두 필수입니다.")
+    if any(not isinstance(value, str) or not value for value in key[:2] + key[3:]) or not isinstance(key[2], str):
+        raise HTTPException(422, "등록 메타의 키 값은 올바른 문자열이어야 합니다.")
     config = session.get(MetaTableConfig, 1)
     audit_now = datetime.now(timezone.utc)
     audit_actor = user.email or user.name
