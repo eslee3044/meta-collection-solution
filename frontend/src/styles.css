@@ -20,7 +20,7 @@
 @media(max-width:760px){.metadata-tabs{margin-top:10px}.metadata-tabs button{flex:1;min-width:0;padding:8px 7px}.metadata-scroll-list{max-height:55vh}}
 .run-row { display: flex; width: 100%; align-items: center; text-align: left; }
 .registered-form .form-grid{gap:16px 20px;padding:6px 2px 12px}.registered-form .form-grid label{gap:8px}.registered-form .form-grid input{min-height:40px;padding:9px 12px}
-.registered-page-layout .metadata-scroll-list .object-row .table-flag-summary{font-size:10px;color:#5f6f86;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.registered-page-layout .metadata-scroll-list .object-row .registered-meta-summary{display:block;margin-top:4px;font-size:10px;color:#5f6f86;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.registered-page-layout .registered-meta-summary .object-type-badge{vertical-align:middle;margin:0 3px;padding:1px 4px;font-size:9px}
 .registered-page-layout .responsive-table th:first-child,.registered-page-layout .responsive-table td:first-child{position:sticky;left:0;z-index:2;background:#fff;box-shadow:2px 0 5px rgba(24,38,61,.08)}
 .registered-page-layout .responsive-table th:first-child{z-index:4;background:#f7f9fc}
 
@@ -91,7 +91,7 @@
 .metadata-layout.registered-page-layout .metadata-main .object-row>svg{margin-left:auto;flex:0 0 auto}
 
 .register-picker-tools{display:flex;align-items:center;gap:12px}.register-picker-tools .search{min-width:260px;margin:0}.register-picker-tools .search input{width:100%}.register-table-picker .picker-head>div:first-child{display:flex;flex-direction:column;gap:4px}.register-table-picker .picker-head>div:first-child small{color:var(--muted);font-size:10px;font-weight:500}.register-pagination{justify-content:center;border-top:1px solid #eef1f5}.register-pagination .page-number{min-width:34px}@media(max-width:760px){.register-picker-tools{width:100%;align-items:stretch;flex-direction:column;gap:8px}.register-picker-tools .search{min-width:0;width:100%}.register-table-picker .picker-head{align-items:stretch;flex-direction:column;gap:12px}}
-.registered-page-layout .metadata-scroll-list .object-row .table-flag-summary{font-size:10px;color:#5f6f86;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.registered-page-layout .metadata-scroll-list .object-row .registered-meta-summary{display:block;margin-top:4px;font-size:10px;color:#5f6f86;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.registered-page-layout .registered-meta-summary .object-type-badge{vertical-align:middle;margin:0 3px;padding:1px 4px;font-size:9px}
 .registered-page-layout .responsive-table th:first-child,.registered-page-layout .responsive-table td:first-child{position:sticky;left:0;z-index:2;background:#fff;box-shadow:2px 0 5px rgba(24,38,61,.08)}
 .registered-page-layout .responsive-table th:first-child{z-index:4;background:#f7f9fc}
 
