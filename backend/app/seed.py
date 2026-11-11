@@ -23,9 +23,11 @@ MENUS = [
     ("dashboard", "대시보드", "/", "LayoutDashboard", 1),
     ("sources", "DB 접속 관리", "/sources", "Database", 2),
     ("metadata", "스키마 정보", "/metadata", "TableProperties", 3),
-    ("jobs", "수집 스케줄", "/jobs", "CalendarClock", 4),
-    ("users", "사용자 관리", "/users", "Users", 5),
-    ("roles", "역할 및 권한", "/roles", "ShieldCheck", 6),
+    ("registered", "등록 메타 관리", "/registered", "Pencil", 4),
+    ("jobs", "수집 스케줄", "/jobs", "CalendarClock", 5),
+    ("users", "사용자 관리", "/users", "Users", 6),
+    ("roles", "역할 및 권한", "/roles", "ShieldCheck", 7),
+    ("system", "시스템 관리", "/system", "Server", 8),
 ]
 
 
@@ -38,6 +40,7 @@ def seed(session: Session) -> None:
     menus = []
     for code, label, path, icon, order in MENUS:
         item = session.scalar(select(Menu).where(Menu.code == code)) or Menu(code=code, label=label, path=path, icon=icon, order=order)
+        item.label, item.path, item.icon, item.order = label, path, icon, order
         session.add(item)
         menus.append(item)
     session.flush()
