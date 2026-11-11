@@ -66,6 +66,12 @@ async def lifespan(_: FastAPI):
         if engine.dialect.name == "postgresql":
             connection.execute(text('CREATE SCHEMA IF NOT EXISTS "EAPET"'))
     Base.metadata.create_all(engine)
+    if engine.dialect.name == "postgresql":
+        with engine.begin() as connection:
+            connection.execute(text('ALTER TABLE "EAPET"."TB_META_TABLES_EXT" ADD COLUMN IF NOT EXISTS "SRC_DATA_SOURCE_ID" INTEGER'))
+            connection.execute(text('ALTER TABLE "EAPET"."TB_META_TABLES_EXT" ADD COLUMN IF NOT EXISTS "SRC_SNAPSHOT_ID" INTEGER'))
+            connection.execute(text('ALTER TABLE "EAPET"."TB_META_COLUMNS_EXT" ADD COLUMN IF NOT EXISTS "SRC_COLUMN_NAME" VARCHAR(255)'))
+            connection.execute(text('ALTER TABLE "EAPET"."TB_META_COLUMNS_EXT" ADD COLUMN IF NOT EXISTS "TGT_COLUMN_NAME" VARCHAR(255)'))
     ensure_integration_views(engine)
     columns = {column["name"] for column in inspect(engine).get_columns("collection_jobs")}
     if "collect_storage" not in columns:
@@ -1067,7 +1073,7 @@ def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapsho
                 target_name = _target_table_name(table_name, payload.target_name_suffix)
                 rules = _informatica_name_rules(payload.system_cd, payload.instance_div_cd)
                 table_comment = (payload.table_comments or {}).get(table_name, table.get("comment") or "")
-                values = {**table_key, "database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "partition_col_modifiable_yn": "Y"}
+                values = {**table_key, "database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "src_data_source_id": snapshot.data_source_id, "src_snapshot_id": snapshot.id, "partition_col_modifiable_yn": "Y"}
                 values = {name: value for name, value in values.items() if name in table_columns}
                 where = and_(*[table_columns[key] == table_key[key] for key in table_keys])
                 if connection.execute(select(tables).where(where)).first():
@@ -1083,7 +1089,7 @@ def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapsho
                     if not column_name or (payload.columns_by_table is not None and column_name not in set(payload.columns_by_table.get(table_name, []))):
                         continue
                     column_key = {**table_key, "column_name": column_name}
-                    column_values = {**column_key, "column_id": int(column.get("ordinal_position") or position), "data_type": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[0], "data_length": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[1], "data_precision": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[2], "data_scale": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[3], "null_yn": "N" if column.get("nullable") is False else "Y", "pk_yn": "Y" if column_name in pk_names else "N", "partition_key_yn": flag_candidates["partition_key_yn"].get(column_name, "N"), "update_base_yn": flag_candidates["update_base_yn"].get(column_name, "N"), "comments": column.get("comment")}
+                    column_values = {**column_key, "src_column_name": column_name, "tgt_column_name": column_name, "column_id": int(column.get("ordinal_position") or position), "data_type": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[0], "data_length": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[1], "data_precision": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[2], "data_scale": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[3], "null_yn": "N" if column.get("nullable") is False else "Y", "pk_yn": "Y" if column_name in pk_names else "N", "partition_key_yn": flag_candidates["partition_key_yn"].get(column_name, "N"), "update_base_yn": flag_candidates["update_base_yn"].get(column_name, "N"), "comments": column.get("comment")}
                     column_values = {name: value for name, value in column_values.items() if name in column_columns}
                     column_where = and_(*[column_columns[key] == column_key[key] for key in column_keys])
                     if connection.execute(select(columns).where(column_where)).first():
@@ -1129,7 +1135,7 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
         if not target:
             target = MetaTableExt(**table_key)
             session.add(target)
-        for key, value in {"database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "partition_col_modifiable_yn": "Y"}.items():
+        for key, value in {"database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "src_data_source_id": snapshot.data_source_id, "src_snapshot_id": snapshot.id, "partition_col_modifiable_yn": "Y"}.items():
             setattr(target, key, value)
         table_count += 1
         pk_names = set((table.get("primary_key") or {}).get("constrained_columns") or [])
@@ -1145,6 +1151,8 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
                 target_column = MetaColumnExt(**column_key)
                 session.add(target_column)
             target_column.column_id = int(column.get("ordinal_position") or position)
+            target_column.src_column_name = column_name
+            target_column.tgt_column_name = column_name
             target_column.data_type, target_column.data_length, target_column.data_precision, target_column.data_scale = _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))
             target_column.null_yn = "N" if column.get("nullable") is False else "Y"
             target_column.pk_yn = "Y" if column_name in pk_names else "N"
