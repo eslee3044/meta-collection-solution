@@ -4,6 +4,7 @@ import json
 import os
 import re
 import secrets
+import hashlib
 from urllib.parse import quote
 from typing import Any
 
@@ -23,7 +24,7 @@ from .integration import ensure_integration_views, snapshot_diff, snapshot_summa
 from .datalake import datalake_root
 from .datalake_query import DatalakeTableNotFound, list_l0_tables, preview_l0_table
 from .load_service import run_full_load
-from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaColumnExt, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
+from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaColumnExt, MetaLayoutChange, MetaLayoutChangeAction, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
 from .capabilities import assert_supported_db_type
 from .collector import available_schema_names, normalize_collection_items, source_engine, test_source
 from .catalog.collection_permissions import check_collection_catalog_permissions
@@ -72,6 +73,24 @@ async def lifespan(_: FastAPI):
             connection.execute(text('ALTER TABLE "EAPET"."TB_META_TABLES_EXT" ADD COLUMN IF NOT EXISTS "SRC_SNAPSHOT_ID" INTEGER'))
             connection.execute(text('ALTER TABLE "EAPET"."TB_META_COLUMNS_EXT" ADD COLUMN IF NOT EXISTS "SRC_COLUMN_NAME" VARCHAR(255)'))
             connection.execute(text('ALTER TABLE "EAPET"."TB_META_COLUMNS_EXT" ADD COLUMN IF NOT EXISTS "TGT_COLUMN_NAME" VARCHAR(255)'))
+            table_tracking_columns = {
+                "SRC_SCHEMA_FINGERPRINT": "VARCHAR(64)", "SRC_PREV_SCHEMA_FINGERPRINT": "VARCHAR(64)",
+                "LAYOUT_STATUS": "VARCHAR(30) DEFAULT 'UNCHANGED'", "LAYOUT_CHANGE_YN": "VARCHAR(1) DEFAULT 'N'",
+                "LAYOUT_CHANGE_COUNT": "INTEGER DEFAULT 0", "LAST_LAYOUT_SNAPSHOT_ID": "INTEGER",
+                "LAST_LAYOUT_CHANGED_AT": "TIMESTAMP WITH TIME ZONE", "METADATA_SYNC_STATUS": "VARCHAR(30) DEFAULT 'APPLIED'",
+                "METADATA_SYNC_MESSAGE": "TEXT", "IS_ACTIVE": "VARCHAR(1) DEFAULT 'Y'",
+            }
+            column_tracking_columns = {
+                "SRC_SNAPSHOT_ID": "INTEGER", "SRC_COLUMN_FINGERPRINT": "VARCHAR(64)",
+                "COLUMN_STATUS": "VARCHAR(30) DEFAULT 'ACTIVE'", "COLUMN_CHANGE_YN": "VARCHAR(1) DEFAULT 'N'",
+                "COLUMN_CHANGE_TYPE": "VARCHAR(40)", "LAST_LAYOUT_SNAPSHOT_ID": "INTEGER",
+                "LAST_LAYOUT_CHANGED_AT": "TIMESTAMP WITH TIME ZONE", "METADATA_SYNC_STATUS": "VARCHAR(30) DEFAULT 'APPLIED'",
+                "METADATA_SYNC_MESSAGE": "TEXT", "IS_ACTIVE": "VARCHAR(1) DEFAULT 'Y'",
+            }
+            for column_name, definition in table_tracking_columns.items():
+                connection.execute(text(f'ALTER TABLE "EAPET"."TB_META_TABLES_EXT" ADD COLUMN IF NOT EXISTS "{column_name}" {definition}'))
+            for column_name, definition in column_tracking_columns.items():
+                connection.execute(text(f'ALTER TABLE "EAPET"."TB_META_COLUMNS_EXT" ADD COLUMN IF NOT EXISTS "{column_name}" {definition}'))
     ensure_integration_views(engine)
     columns = {column["name"] for column in inspect(engine).get_columns("collection_jobs")}
     if "collect_storage" not in columns:
@@ -218,13 +237,86 @@ def change_password(payload: PasswordChangeIn, session: Session = Depends(get_se
 @app.get("/api/dashboard")
 def dashboard(session: Session = Depends(get_session), _: User = Depends(current_user)):
     latest = session.scalars(select(CollectionRun).order_by(desc(CollectionRun.started_at)).limit(8)).all()
+    pending_changes = session.scalars(select(MetaLayoutChange).where(MetaLayoutChange.status == "REVIEW_REQUIRED").order_by(desc(MetaLayoutChange.detected_at)).limit(5)).all()
     return {
         "sources": session.scalar(select(func.count()).select_from(DataSource)) or 0,
         "active_jobs": session.scalar(select(func.count()).select_from(CollectionJob).where(CollectionJob.is_active.is_(True))) or 0,
         "objects": session.scalar(select(func.coalesce(func.sum(CollectionRun.object_count), 0)).where(CollectionRun.status == "success")) or 0,
         "failed_runs": session.scalar(select(func.count()).select_from(CollectionRun).where(CollectionRun.status == "failed")) or 0,
+        "layout_changes_pending": session.scalar(select(func.count()).select_from(MetaLayoutChange).where(MetaLayoutChange.status.in_(["DETECTED", "REVIEW_REQUIRED"]))) or 0,
+        "recent_layout_changes": [{"change_id": item.id, "table_name": item.table_name, "column_name": item.column_name, "change_type": item.change_type, "risk_level": item.risk_level, "status": item.status, "detected_at": item.detected_at} for item in pending_changes],
         "recent_runs": [RunOut.model_validate(item) for item in latest],
     }
+
+
+@app.get("/api/dashboard/collection-trend")
+def dashboard_collection_trend(
+    days: int = Query(default=30, ge=7, le=90),
+    selected_date: str | None = Query(default=None),
+    session: Session = Depends(get_session),
+    _: User = Depends(current_user),
+):
+    """Return daily table/view counts and the selected day's source breakdown."""
+    kst = timezone(timedelta(hours=9))
+    today = datetime.now(kst).date()
+    first_date = today - timedelta(days=days - 1)
+    try:
+        chosen_date = datetime.strptime(selected_date, "%Y-%m-%d").date() if selected_date else today
+    except ValueError as exc:
+        raise HTTPException(400, "selected_date는 YYYY-MM-DD 형식이어야 합니다.") from exc
+    if chosen_date < first_date or chosen_date > today:
+        raise HTTPException(400, "selected_date가 조회 기간을 벗어났습니다.")
+
+    cutoff = datetime.combine(first_date, datetime.min.time(), tzinfo=kst).astimezone(timezone.utc)
+    rows = session.execute(
+        select(SchemaSnapshot, CollectionRun, CollectionJob, DataSource)
+        .join(CollectionRun, SchemaSnapshot.run_id == CollectionRun.id)
+        .join(CollectionJob, CollectionRun.job_id == CollectionJob.id)
+        .join(DataSource, CollectionJob.data_source_id == DataSource.id)
+        .where(CollectionRun.status == "success", SchemaSnapshot.captured_at >= cutoff)
+        .order_by(SchemaSnapshot.captured_at.desc())
+    ).all()
+
+    def snapshot_counts(payload: Any) -> tuple[int, int]:
+        schemas = payload.get("schemas", []) if isinstance(payload, dict) else []
+        tables = sum(len(schema.get("tables", [])) for schema in schemas if isinstance(schema, dict))
+        views = sum(len(schema.get("views", [])) for schema in schemas if isinstance(schema, dict))
+        return tables, views
+
+    latest_by_source_day: dict[tuple[int, str], dict[str, Any]] = {}
+    for snapshot, run, job, source in rows:
+        captured_at = snapshot.captured_at
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=timezone.utc)
+        day = captured_at.astimezone(kst).date().isoformat()
+        key = (source.id, day)
+        if key in latest_by_source_day:
+            continue
+        table_count, view_count = snapshot_counts(snapshot.payload)
+        latest_by_source_day[key] = {
+            "date": day, "source_id": source.id, "source_name": source.name,
+            "db_type": source.db_type, "table_count": table_count,
+            "view_count": view_count, "total_count": table_count + view_count,
+            "status": run.status, "captured_at": captured_at, "run_id": run.id,
+        }
+
+    trend = []
+    for offset in range(days):
+        day = first_date + timedelta(days=offset)
+        items = [item for (source_id, item_day), item in latest_by_source_day.items() if item_day == day.isoformat()]
+        trend.append({
+            "date": day.isoformat(), "table_count": sum(item["table_count"] for item in items),
+            "view_count": sum(item["view_count"] for item in items),
+            "total_count": sum(item["total_count"] for item in items), "source_count": len(items),
+        })
+
+    breakdown = sorted(
+        [item for (source_id, item_day), item in latest_by_source_day.items() if item_day == chosen_date.isoformat()],
+        key=lambda item: item["source_name"],
+    )
+    for item in breakdown:
+        item["captured_at"] = item["captured_at"].isoformat()
+    return {"days": days, "from": first_date.isoformat(), "to": today.isoformat(), "selected_date": chosen_date.isoformat(), "trend": trend, "breakdown": breakdown}
 
 
 def apply_source(item: DataSource, payload: DataSourceIn) -> None:
@@ -1074,7 +1166,7 @@ def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapsho
                 target_name = _target_table_name(table_name, payload.target_name_suffix)
                 rules = _informatica_name_rules(payload.system_cd, payload.instance_div_cd)
                 table_comment = (payload.table_comments or {}).get(table_name, table.get("comment") or "")
-                values = {**table_key, "database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "src_data_source_id": snapshot.data_source_id, "src_snapshot_id": snapshot.id, "createdon": audit_now, "createdby": actor, "lastupdated": audit_now, "updatedby": actor, "partition_col_modifiable_yn": "Y"}
+                values = {**table_key, "database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "src_data_source_id": snapshot.data_source_id, "src_snapshot_id": snapshot.id, "src_schema_fingerprint": snapshot.fingerprint, "layout_status": "UNCHANGED", "layout_change_yn": "N", "metadata_sync_status": "APPLIED", "is_active": "Y", "createdon": audit_now, "createdby": actor, "lastupdated": audit_now, "updatedby": actor, "partition_col_modifiable_yn": "Y"}
                 values = {name: value for name, value in values.items() if name in table_columns}
                 where = and_(*[table_columns[key] == table_key[key] for key in table_keys])
                 existing_table = connection.execute(select(tables).where(where)).first()
@@ -1093,7 +1185,7 @@ def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapsho
                     if not column_name or (payload.columns_by_table is not None and column_name not in set(payload.columns_by_table.get(table_name, []))):
                         continue
                     column_key = {**table_key, "column_name": column_name}
-                    column_values = {**column_key, "src_column_name": column_name, "tgt_column_name": column_name, "createdon": audit_now, "createdby": actor, "lastupdated": audit_now, "updatedby": actor, "column_id": int(column.get("ordinal_position") or position), "data_type": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[0], "data_length": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[1], "data_precision": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[2], "data_scale": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[3], "null_yn": "N" if column.get("nullable") is False else "Y", "pk_yn": "Y" if column_name in pk_names else "N", "partition_key_yn": flag_candidates["partition_key_yn"].get(column_name, "N"), "update_base_yn": flag_candidates["update_base_yn"].get(column_name, "N"), "comments": column.get("comment")}
+                    column_values = {**column_key, "src_column_name": column_name, "tgt_column_name": column_name, "src_snapshot_id": snapshot.id, "column_status": "ACTIVE", "column_change_yn": "N", "metadata_sync_status": "APPLIED", "is_active": "Y", "createdon": audit_now, "createdby": actor, "lastupdated": audit_now, "updatedby": actor, "column_id": int(column.get("ordinal_position") or position), "data_type": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[0], "data_length": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[1], "data_precision": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[2], "data_scale": _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))[3], "null_yn": "N" if column.get("nullable") is False else "Y", "pk_yn": "Y" if column_name in pk_names else "N", "partition_key_yn": flag_candidates["partition_key_yn"].get(column_name, "N"), "update_base_yn": flag_candidates["update_base_yn"].get(column_name, "N"), "comments": column.get("comment")}
                     column_values = {name: value for name, value in column_values.items() if name in column_columns}
                     column_where = and_(*[column_columns[key] == column_key[key] for key in column_keys])
                     existing_column = connection.execute(select(columns).where(column_where)).first()
@@ -1144,7 +1236,7 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
         if not target:
             target = MetaTableExt(**table_key, createdon=audit_now, createdby=audit_actor)
             session.add(target)
-        for key, value in {"database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "src_data_source_id": snapshot.data_source_id, "src_snapshot_id": snapshot.id, "lastupdated": audit_now, "updatedby": audit_actor, "partition_col_modifiable_yn": "Y"}.items():
+        for key, value in {"database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "src_data_source_id": snapshot.data_source_id, "src_snapshot_id": snapshot.id, "src_schema_fingerprint": snapshot.fingerprint, "layout_status": "UNCHANGED", "layout_change_yn": "N", "metadata_sync_status": "APPLIED", "is_active": "Y", "lastupdated": audit_now, "updatedby": audit_actor, "partition_col_modifiable_yn": "Y"}.items():
             setattr(target, key, value)
         table_count += 1
         pk_names = set((table.get("primary_key") or {}).get("constrained_columns") or [])
@@ -1164,6 +1256,11 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
             target_column.tgt_column_name = column_name
             target_column.lastupdated = audit_now
             target_column.updatedby = audit_actor
+            target_column.src_snapshot_id = snapshot.id
+            target_column.column_status = "ACTIVE"
+            target_column.column_change_yn = "N"
+            target_column.metadata_sync_status = "APPLIED"
+            target_column.is_active = "Y"
             target_column.data_type, target_column.data_length, target_column.data_precision, target_column.data_scale = _split_data_type(column.get("type"), column.get("length"), column.get("precision"), column.get("scale"))
             target_column.null_yn = "N" if column.get("nullable") is False else "Y"
             target_column.pk_yn = "Y" if column_name in pk_names else "N"
@@ -1388,14 +1485,256 @@ def update_registered_metadata(payload: dict, session: Session = Depends(get_ses
     return {"status": "updated"}
 
 
+def _metadata_listing_payload(payload: dict) -> dict:
+    compact = dict(payload or {})
+    schemas = []
+    for schema in compact.get("schemas", []):
+        item = dict(schema)
+        procedures = []
+        for procedure in item.get("procedures", []):
+            entry = dict(procedure)
+            for field in ("definition", "body"):
+                value = entry.get(field)
+                if isinstance(value, str) and len(value) > 2000:
+                    entry[field] = value[:2000] + "\n… 상세 정의는 원본 스냅샷에 보관되어 있습니다."
+                    entry[f"{field}_truncated"] = True
+            procedures.append(entry)
+        item["procedures"] = procedures
+        schemas.append(item)
+    compact["schemas"] = schemas
+    return compact
+
+
 @app.get("/api/metadata")
 def metadata(session: Session = Depends(get_session), _: User = Depends(require("metadata:read"))):
-    snapshots = session.scalars(select(SchemaSnapshot).order_by(desc(SchemaSnapshot.captured_at))).all()
-    seen, result = set(), []
-    for item in snapshots:
-        if item.data_source_id not in seen:
-            result.append({"id": item.id, "data_source_id": item.data_source_id, "run_id": item.run_id, "captured_at": item.captured_at, "fingerprint": item.fingerprint, "payload": item.payload})
-            seen.add(item.data_source_id)
+    latest_ids = select(func.max(SchemaSnapshot.id).label("id")).group_by(SchemaSnapshot.data_source_id).subquery()
+    snapshots = session.scalars(select(SchemaSnapshot).where(SchemaSnapshot.id.in_(select(latest_ids.c.id))).order_by(desc(SchemaSnapshot.captured_at))).all()
+    return [{"id": item.id, "data_source_id": item.data_source_id, "run_id": item.run_id, "captured_at": item.captured_at, "fingerprint": item.fingerprint, "payload": _metadata_listing_payload(item.payload)} for item in snapshots]
+
+
+@app.get("/api/metadata/sources/{source_id}/history")
+def metadata_snapshot_history(source_id: int, limit: int = Query(30, ge=2, le=100), session: Session = Depends(get_session), _: User = Depends(require("metadata:read"))):
+    source = session.get(DataSource, source_id)
+    if not source:
+        raise HTTPException(404, "데이터 소스를 찾을 수 없습니다.")
+    snapshots = session.scalars(select(SchemaSnapshot).where(SchemaSnapshot.data_source_id == source_id).order_by(desc(SchemaSnapshot.captured_at), desc(SchemaSnapshot.id)).limit(limit)).all()
+    return [snapshot_summary(snapshot) for snapshot in snapshots]
+
+
+@app.get("/api/metadata/sources/{source_id}/storage-history")
+def metadata_storage_history(source_id: int, schema_name: str = Query(..., min_length=1), table_name: str = Query(..., min_length=1), limit: int = Query(30, ge=2, le=100), session: Session = Depends(get_session), _: User = Depends(require("metadata:read"))):
+    source = session.get(DataSource, source_id)
+    if not source:
+        raise HTTPException(404, "데이터 소스를 찾을 수 없습니다.")
+    snapshots = session.scalars(select(SchemaSnapshot).where(SchemaSnapshot.data_source_id == source_id).order_by(desc(SchemaSnapshot.captured_at), desc(SchemaSnapshot.id)).limit(limit)).all()
+    result = []
+    for snapshot in snapshots:
+        storage = None
+        for schema in (snapshot.payload or {}).get("schemas", []):
+            if schema.get("name") != schema_name:
+                continue
+            for table in schema.get("tables", []):
+                if table.get("name") == table_name:
+                    storage = table.get("storage")
+                    break
+        if storage:
+            result.append({"snapshot_id": snapshot.id, "captured_at": snapshot.captured_at, "schema": schema_name, "table": table_name, "storage": storage})
+    return result
+
+
+def _layout_change_type(kind: str, before: dict | None, after: dict | None, added: bool = False, removed: bool = False) -> tuple[str, str]:
+    if kind == "procedure":
+        return "", ""
+    if added:
+        return (f"{kind.upper()}_ADDED", "SAFE" if kind == "column" else "REVIEW")
+    if removed:
+        return (f"{kind.upper()}_REMOVED", "BREAKING")
+    if kind == "column":
+        before, after = before or {}, after or {}
+        if before.get("type") != after.get("type") or any(before.get(key) != after.get(key) for key in ("length", "precision", "scale")):
+            return "COLUMN_TYPE_CHANGED", "BREAKING"
+        if before.get("nullable") != after.get("nullable"):
+            return "COLUMN_NULLABILITY_CHANGED", "BREAKING"
+        if before.get("comment") != after.get("comment"):
+            return "COLUMN_COMMENT_CHANGED", "SAFE"
+        return "COLUMN_CHANGED", "REVIEW"
+    return f"{kind.upper()}_CHANGED", "REVIEW"
+
+
+def _layout_change_fingerprint(item: dict, before_snapshot_id: int, after_snapshot_id: int) -> str:
+    raw = json.dumps({"before_snapshot_id": before_snapshot_id, "after_snapshot_id": after_snapshot_id, **item}, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _persist_layout_changes(session: Session, before: SchemaSnapshot, after: SchemaSnapshot, diff: dict[str, Any]) -> int:
+    # A skipped schema means absence cannot safely be interpreted as a deletion.
+    skipped = {(item.get("name") if isinstance(item, dict) else str(item)) for item in ((after.payload or {}).get("skipped_schemas") or [])}
+    persisted = 0
+    candidates = [(item, True, False) for item in diff.get("added", [])]
+    candidates += [(item, False, True) for item in diff.get("removed", []) if (item.get("schema") or "") not in skipped]
+    candidates += [(item, False, False) for item in diff.get("changed", [])]
+    for item, added, removed in candidates:
+        kind = item.get("kind") or ""
+        change_type, risk = _layout_change_type(kind, item.get("before"), item.get("after") or item.get("value"), added, removed)
+        if not change_type:
+            continue
+        before_value = item.get("before") if not added and not removed else (item.get("value") if removed else None)
+        after_value = item.get("after") if not removed and not added else (item.get("value") if added else None)
+        if kind != "column" and isinstance(after_value or before_value, dict):
+            clean = dict(after_value or before_value or {})
+            clean.pop("storage", None)
+            if kind in {"table", "view"} and before_value and after_value:
+                left, right = dict(before_value), dict(after_value)
+                left.pop("storage", None); right.pop("storage", None)
+                if left == right:
+                    continue
+                before_value, after_value = left, right
+        item_for_hash = {"key": item.get("key"), "kind": kind, "change_type": change_type, "before": before_value, "after": after_value}
+        fingerprint = _layout_change_fingerprint(item_for_hash, before.id, after.id)
+        if session.scalar(select(MetaLayoutChange).where(MetaLayoutChange.change_fingerprint == fingerprint)):
+            continue
+        change = MetaLayoutChange(
+            system_cd=None,
+            instance_name=(after.payload or {}).get("source"),
+            owner=item.get("schema"),
+            table_name=item.get("table") or (item.get("name") if kind in {"table", "view"} else None),
+            object_type="COLUMN" if kind == "column" else kind.upper(),
+            column_name=item.get("name") if kind == "column" else None,
+            change_type=change_type,
+            risk_level=risk,
+            change_path=item.get("key"),
+            before_value=json.dumps(before_value, ensure_ascii=False, sort_keys=True, default=str) if before_value is not None else None,
+            after_value=json.dumps(after_value, ensure_ascii=False, sort_keys=True, default=str) if after_value is not None else None,
+            detail_json=json.dumps(item, ensure_ascii=False, sort_keys=True, default=str),
+            before_snapshot_id=before.id,
+            after_snapshot_id=after.id,
+            change_fingerprint=fingerprint,
+            status="REVIEW_REQUIRED",
+        )
+        session.add(change)
+        session.flush()
+        session.add(MetaLayoutChangeAction(change_id=change.id, action_type="DETECTED", actor="collector"))
+        persisted += 1
+    if persisted:
+        session.commit()
+    return persisted
+
+
+@app.get("/api/metadata/layout-changes")
+def list_layout_changes(
+    source_id: int | None = Query(None), status: str | None = Query(None), risk_level: str | None = Query(None),
+    page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
+    session: Session = Depends(get_session), _: User = Depends(require("metadata:read")),
+):
+    query = select(MetaLayoutChange)
+    if source_id is not None:
+        query = query.where(MetaLayoutChange.after_snapshot_id.in_(select(SchemaSnapshot.id).where(SchemaSnapshot.data_source_id == source_id)))
+    if status:
+        query = query.where(MetaLayoutChange.status == status.upper())
+    if risk_level:
+        query = query.where(MetaLayoutChange.risk_level == risk_level.upper())
+    total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
+    rows = session.scalars(query.order_by(desc(MetaLayoutChange.detected_at), desc(MetaLayoutChange.id)).offset((page - 1) * page_size).limit(page_size)).all()
+    return {"items": [{"change_id": row.id, "instance_name": row.instance_name, "owner": row.owner, "table_name": row.table_name, "object_type": row.object_type, "column_name": row.column_name, "change_type": row.change_type, "risk_level": row.risk_level, "status": row.status, "before": json.loads(row.before_value) if row.before_value else None, "after": json.loads(row.after_value) if row.after_value else None, "before_snapshot_id": row.before_snapshot_id, "after_snapshot_id": row.after_snapshot_id, "detected_at": row.detected_at} for row in rows], "total": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size}
+
+
+@app.post("/api/metadata/layout-changes/{change_id}/approve")
+def approve_layout_change(change_id: int, payload: dict | None = None, session: Session = Depends(get_session), user: User = Depends(require("metadata:write"))):
+    change = session.get(MetaLayoutChange, change_id)
+    if not change:
+        raise HTTPException(404, "메타 변경 내역을 찾을 수 없습니다.")
+    if change.status not in {"REVIEW_REQUIRED", "DETECTED", "REJECTED"}:
+        raise HTTPException(409, f"현재 상태({change.status})에서는 승인할 수 없습니다.")
+    change.status = "APPROVED"
+    change.reject_reason = None
+    change.reviewed_by = user.email or user.name
+    change.reviewed_at = datetime.now(timezone.utc)
+    session.add(MetaLayoutChangeAction(change_id=change.id, action_type="APPROVED", actor=user.email or user.name, action_comment=(payload or {}).get("comment")))
+    session.commit()
+    return {"status": change.status, "change_id": change.id}
+
+
+@app.post("/api/metadata/layout-changes/{change_id}/reject")
+def reject_layout_change(change_id: int, payload: dict, session: Session = Depends(get_session), user: User = Depends(require("metadata:write"))):
+    reason = str(payload.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(422, "반려 사유를 입력해야 합니다.")
+    change = session.get(MetaLayoutChange, change_id)
+    if not change:
+        raise HTTPException(404, "메타 변경 내역을 찾을 수 없습니다.")
+    if change.status not in {"REVIEW_REQUIRED", "DETECTED"}:
+        raise HTTPException(409, f"현재 상태({change.status})에서는 반려할 수 없습니다.")
+    change.status = "REJECTED"
+    change.reject_reason = reason[:2000]
+    change.reviewed_by = user.email or user.name
+    change.reviewed_at = datetime.now(timezone.utc)
+    session.add(MetaLayoutChangeAction(change_id=change.id, action_type="REJECTED", actor=user.email or user.name, action_comment=reason[:2000]))
+    session.commit()
+    return {"status": change.status, "change_id": change.id}
+
+
+@app.post("/api/metadata/layout-changes/{change_id}/apply")
+def apply_layout_change(change_id: int, session: Session = Depends(get_session), user: User = Depends(require("metadata:write"))):
+    change = session.get(MetaLayoutChange, change_id)
+    if not change:
+        raise HTTPException(404, "메타 변경 내역을 찾을 수 없습니다.")
+    if change.status != "APPROVED":
+        raise HTTPException(409, "승인된 변경만 메타 테이블에 반영할 수 있습니다.")
+    if not change.instance_name or not change.owner or not change.table_name:
+        raise HTTPException(409, "등록 메타와 연결할 수 없는 변경입니다.")
+    targets = session.scalars(select(MetaTableExt).where(MetaTableExt.instance_name == change.instance_name, MetaTableExt.owner == change.owner, MetaTableExt.table_name == change.table_name)).all()
+    if not targets:
+        raise HTTPException(409, "현재 등록된 메타 테이블과 연결되지 않은 변경입니다.")
+    after = json.loads(change.after_value) if change.after_value else {}
+    for table in targets:
+        table.layout_status = "REMOVED" if change.change_type in {"TABLE_REMOVED", "VIEW_REMOVED"} else "CHANGED"
+        table.layout_change_yn = "Y"
+        table.is_active = "N" if change.change_type in {"TABLE_REMOVED", "VIEW_REMOVED"} else "Y"
+        table.last_layout_snapshot_id = change.after_snapshot_id
+        table.last_layout_changed_at = datetime.now(timezone.utc)
+        table.metadata_sync_status = "APPLIED"
+        if change.object_type == "COLUMN" and change.column_name:
+            column = session.scalar(select(MetaColumnExt).where(MetaColumnExt.system_cd == table.system_cd, MetaColumnExt.instance_name == table.instance_name, MetaColumnExt.postfix == table.postfix, MetaColumnExt.owner == table.owner, MetaColumnExt.table_name == table.table_name, MetaColumnExt.column_name == change.column_name))
+            if change.change_type == "COLUMN_REMOVED" and column:
+                column.column_status = "INACTIVE"; column.is_active = "N"
+            elif change.change_type == "COLUMN_ADDED" and not column:
+                column = MetaColumnExt(system_cd=table.system_cd, instance_name=table.instance_name, postfix=table.postfix, owner=table.owner, table_name=table.table_name, column_name=change.column_name, src_column_name=change.column_name, tgt_column_name=change.column_name, src_snapshot_id=change.after_snapshot_id, column_status="ACTIVE", column_change_yn="N", metadata_sync_status="APPLIED", is_active="Y", createdon=datetime.now(timezone.utc), createdby=user.email or user.name)
+                session.add(column)
+            if column and after:
+                column.data_type = str(after.get("type") or column.data_type)
+                column.data_length = after.get("length") or column.data_length
+                column.data_precision = after.get("precision") or column.data_precision
+                column.data_scale = after.get("scale") or column.data_scale
+                if "nullable" in after: column.null_yn = "N" if after.get("nullable") is False else "Y"
+                if "comment" in after: column.comments = after.get("comment")
+                column.column_status = "ACTIVE"; column.is_active = "Y"
+            if column:
+                column.column_change_yn = "N"; column.column_change_type = change.change_type; column.metadata_sync_status = "APPLIED"; column.last_layout_snapshot_id = change.after_snapshot_id
+    change.status = "APPLIED"
+    change.applied_by = user.email or user.name
+    change.applied_at = datetime.now(timezone.utc)
+    session.add(MetaLayoutChangeAction(change_id=change.id, action_type="APPLIED", actor=user.email or user.name))
+    session.commit()
+    return {"status": change.status, "change_id": change.id}
+
+
+@app.get("/api/metadata/sources/{source_id}/diff")
+def metadata_snapshot_diff(source_id: int, from_snapshot_id: int | None = None, to_snapshot_id: int | None = None, session: Session = Depends(get_session), _: User = Depends(require("metadata:read"))):
+    source = session.get(DataSource, source_id)
+    if not source:
+        raise HTTPException(404, "데이터 소스를 찾을 수 없습니다.")
+    snapshots = session.scalars(select(SchemaSnapshot).where(SchemaSnapshot.data_source_id == source_id).order_by(desc(SchemaSnapshot.captured_at), desc(SchemaSnapshot.id)).limit(100)).all()
+    if from_snapshot_id is None or to_snapshot_id is None:
+        if len(snapshots) < 2:
+            return {"from_snapshot_id": None, "to_snapshot_id": snapshots[0].id if snapshots else None, "counts": {"added": 0, "removed": 0, "changed": 0}, "added": [], "removed": [], "changed": [], "message": "비교할 이전 스냅샷이 없습니다."}
+        after, before = snapshots[0], snapshots[1]
+    else:
+        before = session.get(SchemaSnapshot, from_snapshot_id)
+        after = session.get(SchemaSnapshot, to_snapshot_id)
+        if not before or not after or before.data_source_id != source_id or after.data_source_id != source_id:
+            raise HTTPException(404, "같은 데이터 소스의 유효한 snapshot 두 개가 필요합니다.")
+    result = snapshot_diff(before, after)
+    _persist_layout_changes(session, before, after, result)
     return result
 
 

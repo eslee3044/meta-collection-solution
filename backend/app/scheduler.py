@@ -321,10 +321,23 @@ def execute_job(job_id: int, run_id: int | None = None) -> int:
                     .limit(1)
                 )
                 apply_storage_growth(payload, previous.payload if previous else None)
+            else:
+                previous = session.scalar(
+                    select(SchemaSnapshot)
+                    .where(SchemaSnapshot.data_source_id == job.data_source_id)
+                    .order_by(desc(SchemaSnapshot.captured_at))
+                    .limit(1)
+                )
             current_step = "save_snapshot"
             log("info", "save_snapshot", f"수집 결과를 저장합니다. 객체 {count}개", commit=False)
             now = datetime.now(timezone.utc)
-            session.add(SchemaSnapshot(data_source_id=job.data_source_id, run_id=run.id, payload=payload, fingerprint=fingerprint))
+            snapshot = SchemaSnapshot(data_source_id=job.data_source_id, run_id=run.id, payload=payload, fingerprint=fingerprint)
+            session.add(snapshot)
+            session.flush()
+            if previous:
+                from .integration import snapshot_diff
+                from .main import _persist_layout_changes
+                _persist_layout_changes(session, previous, snapshot, snapshot_diff(previous.payload, payload))
             sequence += 1
             session.add(RunLog(run_id=run.id, sequence=sequence, level="info", step="complete", message="수집이 정상적으로 완료되었습니다."))
             completed = session.execute(

@@ -9,6 +9,13 @@ from sqlalchemy import Engine, text
 def snapshot_summary(snapshot: Any) -> dict[str, Any]:
     payload = snapshot.payload or {}
     schemas = payload.get("schemas", [])
+    storage_rows = []
+    for schema in schemas:
+        for table in schema.get("tables", []):
+            item = table.get("storage") or {}
+            if item:
+                storage_rows.append({"schema": schema.get("name"), "table": table.get("name"), "total_bytes": item.get("total_bytes"), "growth_bytes": item.get("growth_bytes"), "growth_percent": item.get("growth_percent")})
+    storage_rows.sort(key=lambda item: item.get("growth_bytes") or 0, reverse=True)
     return {
         "id": snapshot.id,
         "data_source_id": snapshot.data_source_id,
@@ -23,6 +30,8 @@ def snapshot_summary(snapshot: Any) -> dict[str, Any]:
         "view_count": sum(len(schema.get("views", [])) for schema in schemas),
         "procedure_count": sum(len(schema.get("procedures", [])) for schema in schemas),
         "skipped_schemas": payload.get("skipped_schemas", []),
+        "storage_summary": payload.get("storage_summary"),
+        "storage_top_tables": storage_rows[:10],
     }
 
 

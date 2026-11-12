@@ -189,6 +189,16 @@ class MetaTableExt(Base):
     table_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     src_data_source_id: Mapped[int | None] = mapped_column("SRC_DATA_SOURCE_ID", Integer, nullable=True)
     src_snapshot_id: Mapped[int | None] = mapped_column("SRC_SNAPSHOT_ID", Integer, nullable=True)
+    src_schema_fingerprint: Mapped[str | None] = mapped_column("SRC_SCHEMA_FINGERPRINT", String(64), nullable=True)
+    src_prev_schema_fingerprint: Mapped[str | None] = mapped_column("SRC_PREV_SCHEMA_FINGERPRINT", String(64), nullable=True)
+    layout_status: Mapped[str] = mapped_column("LAYOUT_STATUS", String(30), default="UNCHANGED")
+    layout_change_yn: Mapped[str] = mapped_column("LAYOUT_CHANGE_YN", String(1), default="N")
+    layout_change_count: Mapped[int] = mapped_column("LAYOUT_CHANGE_COUNT", Integer, default=0)
+    last_layout_snapshot_id: Mapped[int | None] = mapped_column("LAST_LAYOUT_SNAPSHOT_ID", Integer, nullable=True)
+    last_layout_changed_at: Mapped[datetime | None] = mapped_column("LAST_LAYOUT_CHANGED_AT", DateTime(timezone=True), nullable=True)
+    metadata_sync_status: Mapped[str] = mapped_column("METADATA_SYNC_STATUS", String(30), default="APPLIED")
+    metadata_sync_message: Mapped[str | None] = mapped_column("METADATA_SYNC_MESSAGE", Text, nullable=True)
+    is_active: Mapped[str] = mapped_column("IS_ACTIVE", String(1), default="Y")
     sql_insp_yn: Mapped[str | None] = mapped_column(String(1), nullable=True)
     sql_src_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sql_tgt_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -207,6 +217,16 @@ class MetaColumnExt(Base):
     column_name: Mapped[str] = mapped_column(String(255), primary_key=True)
     src_column_name: Mapped[str | None] = mapped_column("SRC_COLUMN_NAME", String(255), nullable=True)
     tgt_column_name: Mapped[str | None] = mapped_column("TGT_COLUMN_NAME", String(255), nullable=True)
+    src_snapshot_id: Mapped[int | None] = mapped_column("SRC_SNAPSHOT_ID", Integer, nullable=True)
+    src_column_fingerprint: Mapped[str | None] = mapped_column("SRC_COLUMN_FINGERPRINT", String(64), nullable=True)
+    column_status: Mapped[str] = mapped_column("COLUMN_STATUS", String(30), default="ACTIVE")
+    column_change_yn: Mapped[str] = mapped_column("COLUMN_CHANGE_YN", String(1), default="N")
+    column_change_type: Mapped[str | None] = mapped_column("COLUMN_CHANGE_TYPE", String(40), nullable=True)
+    last_layout_snapshot_id: Mapped[int | None] = mapped_column("LAST_LAYOUT_SNAPSHOT_ID", Integer, nullable=True)
+    last_layout_changed_at: Mapped[datetime | None] = mapped_column("LAST_LAYOUT_CHANGED_AT", DateTime(timezone=True), nullable=True)
+    metadata_sync_status: Mapped[str] = mapped_column("METADATA_SYNC_STATUS", String(30), default="APPLIED")
+    metadata_sync_message: Mapped[str | None] = mapped_column("METADATA_SYNC_MESSAGE", Text, nullable=True)
+    is_active: Mapped[str] = mapped_column("IS_ACTIVE", String(1), default="Y")
     column_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     data_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     data_length: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -224,6 +244,49 @@ class MetaColumnExt(Base):
     createdby: Mapped[str | None] = mapped_column(String(255), nullable=True)
     lastupdated: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updatedby: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class MetaLayoutChange(Base):
+    __tablename__ = "TB_META_LAYOUT_CHANGES_EXT"
+    __table_args__ = {"schema": "EAPET", "quote": True}
+
+    id: Mapped[int] = mapped_column("CHANGE_ID", primary_key=True)
+    system_cd: Mapped[str | None] = mapped_column("SYSTEM_CD", String(32), nullable=True, index=True)
+    instance_name: Mapped[str | None] = mapped_column("INSTANCE_NAME", String(255), nullable=True, index=True)
+    postfix: Mapped[str | None] = mapped_column("POSTFIX", String(32), nullable=True)
+    owner: Mapped[str | None] = mapped_column("OWNER", String(255), nullable=True)
+    table_name: Mapped[str | None] = mapped_column("TABLE_NAME", String(255), nullable=True, index=True)
+    object_type: Mapped[str] = mapped_column("OBJECT_TYPE", String(20), default="TABLE")
+    column_name: Mapped[str | None] = mapped_column("COLUMN_NAME", String(255), nullable=True)
+    change_type: Mapped[str] = mapped_column("CHANGE_TYPE", String(60))
+    risk_level: Mapped[str] = mapped_column("RISK_LEVEL", String(20), default="REVIEW")
+    change_path: Mapped[str | None] = mapped_column("CHANGE_PATH", String(255), nullable=True)
+    before_value: Mapped[str | None] = mapped_column("BEFORE_VALUE", Text, nullable=True)
+    after_value: Mapped[str | None] = mapped_column("AFTER_VALUE", Text, nullable=True)
+    detail_json: Mapped[str | None] = mapped_column("CHANGE_DETAIL_JSON", Text, nullable=True)
+    before_snapshot_id: Mapped[int | None] = mapped_column("BEFORE_SNAPSHOT_ID", Integer, nullable=True, index=True)
+    after_snapshot_id: Mapped[int | None] = mapped_column("AFTER_SNAPSHOT_ID", Integer, nullable=True, index=True)
+    change_fingerprint: Mapped[str] = mapped_column("CHANGE_FINGERPRINT", String(64), unique=True, index=True)
+    status: Mapped[str] = mapped_column("CHANGE_STATUS", String(30), default="REVIEW_REQUIRED", index=True)
+    detected_at: Mapped[datetime] = mapped_column("DETECTED_AT", DateTime(timezone=True), default=utcnow)
+    reviewed_by: Mapped[str | None] = mapped_column("REVIEWED_BY", String(255), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column("REVIEWED_AT", DateTime(timezone=True), nullable=True)
+    applied_by: Mapped[str | None] = mapped_column("APPLIED_BY", String(255), nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column("APPLIED_AT", DateTime(timezone=True), nullable=True)
+    reject_reason: Mapped[str | None] = mapped_column("REJECT_REASON", Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column("ERROR_MESSAGE", Text, nullable=True)
+
+
+class MetaLayoutChangeAction(Base):
+    __tablename__ = "TB_META_LAYOUT_CHANGE_ACTIONS_EXT"
+    __table_args__ = {"schema": "EAPET", "quote": True}
+
+    id: Mapped[int] = mapped_column("ACTION_ID", primary_key=True)
+    change_id: Mapped[int] = mapped_column("CHANGE_ID", Integer, index=True)
+    action_type: Mapped[str] = mapped_column("ACTION_TYPE", String(30))
+    action_comment: Mapped[str | None] = mapped_column("ACTION_COMMENT", Text, nullable=True)
+    actor: Mapped[str] = mapped_column("ACTOR", String(255))
+    acted_at: Mapped[datetime] = mapped_column("ACTED_AT", DateTime(timezone=True), default=utcnow)
 
 
 class MetaTableConfig(TimestampMixin, Base):
