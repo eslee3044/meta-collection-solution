@@ -337,7 +337,7 @@ def execute_job(job_id: int, run_id: int | None = None) -> int:
             if previous:
                 from .integration import snapshot_diff
                 from .main import _persist_layout_changes
-                _persist_layout_changes(session, previous, snapshot, snapshot_diff(previous.payload, payload))
+                _persist_layout_changes(session, previous, snapshot, snapshot_diff(previous, snapshot))
             sequence += 1
             session.add(RunLog(run_id=run.id, sequence=sequence, level="info", step="complete", message="수집이 정상적으로 완료되었습니다."))
             completed = session.execute(
