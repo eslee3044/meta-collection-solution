@@ -1032,13 +1032,19 @@ def _meta_table_script(config: MetaTableConfig, db_type: str) -> str:
 @app.get("/api/metadata/register-script")
 def metadata_register_script(session: Session = Depends(get_session), _: User = Depends(require("metadata:write"))):
     config = session.get(MetaTableConfig, 1)
-    if not config or config.source_type != "external" or config.external_source_id is None:
-        raise HTTPException(400, "외부 DB 메타 등록 설정이 없습니다.")
-    source = session.get(DataSource, config.external_source_id)
-    if not source:
-        raise HTTPException(404, "설정된 외부 DB 접속정보를 찾을 수 없습니다.")
-    content = _meta_table_script(config, source.db_type)
-    filename = f"metavault_meta_tables_{source.db_type}.sql"
+    if not config:
+        raise HTTPException(400, "메타 테이블 조회 설정이 없습니다.")
+    if config.source_type == "external":
+        if config.external_source_id is None:
+            raise HTTPException(400, "외부 DB 메타 등록 설정이 없습니다.")
+        source = session.get(DataSource, config.external_source_id)
+        if not source:
+            raise HTTPException(404, "설정된 외부 DB 접속정보를 찾을 수 없습니다.")
+        db_type = source.db_type
+    else:
+        db_type = "postgresql"
+    content = _meta_table_script(config, db_type)
+    filename = f"metavault_meta_tables_{db_type}.sql"
     return Response(content=content, media_type="text/sql; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
