@@ -1,4 +1,4 @@
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -1093,6 +1093,60 @@ def _meta_table_script(config: MetaTableConfig, db_type: str) -> str:
         ");",
     ]
     return chr(10).join(lines)
+
+
+@app.post("/api/metadata/register-script/execute")
+def execute_metadata_register_script(session: Session = Depends(get_session), _: User = Depends(require("admin:*"))):
+    config = session.get(MetaTableConfig, 1)
+    if not config:
+        raise HTTPException(400, "메타 테이블 조회 설정이 없습니다.")
+    source = None
+    if config.source_type == "external":
+        if config.external_source_id is None:
+            raise HTTPException(400, "외부 DB 접속정보가 설정되지 않았습니다.")
+        source = session.get(DataSource, config.external_source_id)
+        if not source:
+            raise HTTPException(404, "설정된 외부 DB 접속정보를 찾을 수 없습니다.")
+        db_type = source.db_type
+    else:
+        db_type = "postgresql"
+
+    table_names = [
+        config.tables_table_name,
+        config.columns_table_name,
+        "TB_META_LAYOUT_CHANGES_EXT",
+        "TB_META_LAYOUT_CHANGE_ACTIONS_EXT",
+    ]
+    try:
+        with (source_engine(source) if source else nullcontext(engine)) as target_engine:
+            with target_engine.begin() as connection:
+                inspector = inspect(connection)
+                existing = {name for name in table_names if inspector.has_table(name, schema=config.schema_name)}
+                missing = [name for name in table_names if name not in existing]
+                if missing:
+                    script = _meta_table_script(config, db_type)
+                    statements = [statement.strip() for statement in script.split(";") if statement.strip()]
+                    index_targets = {
+                        f"{config.tables_table_name}_system_cd_idx": config.tables_table_name,
+                        f"{config.columns_table_name}_system_cd_idx": config.columns_table_name,
+                    }
+                    for statement in statements:
+                        upper = statement.upper()
+                        if upper.startswith("CREATE SCHEMA"):
+                            if db_type != "mssql":
+                                connection.exec_driver_sql(statement)
+                            continue
+                        target = next((name for name in table_names if name.lower() in statement.lower()), None)
+                        if upper.startswith("CREATE TABLE") and target and target in missing:
+                            connection.exec_driver_sql(statement)
+                        elif upper.startswith("CREATE INDEX"):
+                            index_target = next((table for index, table in index_targets.items() if index.lower() in statement.lower()), None)
+                            if index_target in missing:
+                                connection.exec_driver_sql(statement)
+                return {"status": "created" if missing else "ready", "created_tables": missing, "existing_tables": sorted(existing), "failed_tables": []}
+    except Exception as error:
+        raise HTTPException(502, f"메타 테이블 생성에 실패했습니다: {type(error).__name__}") from error
+
 
 
 @app.get("/api/metadata/register-script")
