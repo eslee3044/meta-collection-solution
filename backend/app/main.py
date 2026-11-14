@@ -79,6 +79,7 @@ async def lifespan(_: FastAPI):
                 "LAYOUT_CHANGE_COUNT": "INTEGER DEFAULT 0", "LAST_LAYOUT_SNAPSHOT_ID": "INTEGER",
                 "LAST_LAYOUT_CHANGED_AT": "TIMESTAMP WITH TIME ZONE", "METADATA_SYNC_STATUS": "VARCHAR(30) DEFAULT 'APPLIED'",
                 "METADATA_SYNC_MESSAGE": "TEXT", "IS_ACTIVE": "VARCHAR(1) DEFAULT 'Y'",
+                "sql_src_tcount": "VARCHAR(4000)", "sql_tgt_tcount": "VARCHAR(4000)", "sql_tgt_pk_dup": "VARCHAR(4000)",
             }
             column_tracking_columns = {
                 "SRC_SNAPSHOT_ID": "INTEGER", "SRC_COLUMN_FINGERPRINT": "VARCHAR(64)",

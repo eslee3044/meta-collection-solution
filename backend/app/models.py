@@ -200,9 +200,9 @@ class MetaTableExt(Base):
     metadata_sync_message: Mapped[str | None] = mapped_column("METADATA_SYNC_MESSAGE", Text, nullable=True)
     is_active: Mapped[str] = mapped_column("IS_ACTIVE", String(1), default="Y")
     sql_insp_yn: Mapped[str | None] = mapped_column(String(1), nullable=True)
-    sql_src_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    sql_tgt_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    sql_tgt_pk_dup: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sql_src_count: Mapped[str | None] = mapped_column("sql_src_tcount", String(4000), nullable=True)
+    sql_tgt_count: Mapped[str | None] = mapped_column("sql_tgt_tcount", String(4000), nullable=True)
+    sql_tgt_pk_dup: Mapped[str | None] = mapped_column("sql_tgt_pk_dup", String(4000), nullable=True)
 
 
 class MetaColumnExt(Base):
