@@ -25,3 +25,16 @@ def test_compare_metadata_structure_returns_empty_for_same_columns_and_indexes()
     }
 
     assert _compare_metadata_structure(structure, structure) == []
+
+
+def test_compare_metadata_structure_accepts_database_generated_unique_index_name():
+    expected = {
+        "columns": ["CHANGE_FINGERPRINT"],
+        "indexes": [{"name": "", "columns": ["CHANGE_FINGERPRINT"], "unique": True}],
+    }
+    actual = {
+        "columns": ["CHANGE_FINGERPRINT"],
+        "indexes": [{"name": "TB_META_LAYOUT_CHANGES_EXT_CHANGE_FINGERPRINT", "columns": ["CHANGE_FINGERPRINT"], "unique": True}],
+    }
+
+    assert _compare_metadata_structure(expected, actual) == []

@@ -237,13 +237,15 @@ def change_password(payload: PasswordChangeIn, session: Session = Depends(get_se
 @app.get("/api/dashboard")
 def dashboard(session: Session = Depends(get_session), _: User = Depends(current_user)):
     latest = session.scalars(select(CollectionRun).order_by(desc(CollectionRun.started_at)).limit(8)).all()
-    pending_changes = session.scalars(select(MetaLayoutChange).where(MetaLayoutChange.status.in_(["DETECTED", "REVIEW_REQUIRED", "APPROVED"])).order_by(desc(MetaLayoutChange.detected_at)).limit(5)).all()
+    registered_layout_target = select(MetaTableExt.id).where(MetaTableExt.instance_name == MetaLayoutChange.instance_name, MetaTableExt.owner == MetaLayoutChange.owner, MetaTableExt.table_name == MetaLayoutChange.table_name).exists()
+    pending_layout_query = select(MetaLayoutChange).where(MetaLayoutChange.status.in_(["DETECTED", "REVIEW_REQUIRED", "APPROVED"]), registered_layout_target)
+    pending_changes = session.scalars(pending_layout_query.order_by(desc(MetaLayoutChange.detected_at)).limit(5)).all()
     return {
         "sources": session.scalar(select(func.count()).select_from(DataSource)) or 0,
         "active_jobs": session.scalar(select(func.count()).select_from(CollectionJob).where(CollectionJob.is_active.is_(True))) or 0,
         "objects": session.scalar(select(func.coalesce(func.sum(CollectionRun.object_count), 0)).where(CollectionRun.status == "success")) or 0,
         "failed_runs": session.scalar(select(func.count()).select_from(CollectionRun).where(CollectionRun.status == "failed")) or 0,
-        "layout_changes_pending": session.scalar(select(func.count()).select_from(MetaLayoutChange).where(MetaLayoutChange.status.in_(["DETECTED", "REVIEW_REQUIRED", "APPROVED"]))) or 0,
+        "layout_changes_pending": session.scalar(select(func.count()).select_from(MetaLayoutChange).where(MetaLayoutChange.status.in_(["DETECTED", "REVIEW_REQUIRED", "APPROVED"]), registered_layout_target)) or 0,
         "recent_layout_changes": [{"change_id": item.id, "table_name": item.table_name, "column_name": item.column_name, "change_type": item.change_type, "risk_level": item.risk_level, "status": item.status, "detected_at": item.detected_at} for item in pending_changes],
         "recent_runs": [RunOut.model_validate(item) for item in latest],
     }
@@ -1104,15 +1106,21 @@ def _compare_metadata_structure(expected: dict[str, Any], actual: dict[str, Any]
     for name in sorted(actual_columns - expected_columns):
         differences.append(f"추가 컬럼: {name}")
 
-    def index_key(index: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
-        return (str(index.get("name", "")).upper(), tuple(str(column).upper() for column in index.get("columns", [])))
+    def index_key(index: dict[str, Any]) -> tuple[str, tuple[str, ...], bool]:
+        return (str(index.get("name", "")).upper(), tuple(str(column).upper() for column in index.get("columns", [])), bool(index.get("unique", False)))
 
-    expected_indexes = {index_key(index) for index in expected.get("indexes", [])}
-    actual_indexes = {index_key(index) for index in actual.get("indexes", [])}
-    for name, columns in sorted(expected_indexes - actual_indexes):
-        differences.append(f"누락 인덱스: {name} ({', '.join(columns)})")
-    for name, columns in sorted(actual_indexes - expected_indexes):
-        differences.append(f"추가 또는 불일치 인덱스: {name} ({', '.join(columns)})")
+    expected_indexes = [index_key(index) for index in expected.get("indexes", [])]
+    actual_indexes = [index_key(index) for index in actual.get("indexes", [])]
+    unmatched_actual = list(actual_indexes)
+    for expected_name, expected_columns_for_index, expected_unique in expected_indexes:
+        match_index = next((index for index, actual_index in enumerate(unmatched_actual) if actual_index[1] == expected_columns_for_index and actual_index[2] == expected_unique and (not expected_name or actual_index[0] == expected_name)), None)
+        if match_index is None:
+            differences.append(f"누락 인덱스: {expected_name or ', '.join(expected_columns_for_index)} ({', '.join(expected_columns_for_index)})")
+        else:
+            unmatched_actual.pop(match_index)
+    for name, columns, unique in unmatched_actual:
+        suffix = " UNIQUE" if unique else ""
+        differences.append(f"추가 또는 불일치 인덱스: {name} ({', '.join(columns)}){suffix}")
     return differences
 
 
@@ -1131,15 +1139,17 @@ def _metadata_expected_structure(config: MetaTableConfig, db_type: str) -> dict[
         if not matching_name:
             continue
         columns: list[str] = []
+        expected[matching_name] = {"columns": columns, "indexes": []}
         for line in body.splitlines():
             line = line.strip().rstrip(",")
             if not line or line.upper().startswith(("PRIMARY KEY", "CONSTRAINT", "UNIQUE", "FOREIGN KEY")):
                 continue
             column_match = re.match(r"(?:\"([^\"]+)\"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z0-9_]+))\s+", line)
             if column_match:
-                columns.append(next(value for value in column_match.groups() if value is not None))
-        expected[matching_name] = {"columns": columns, "indexes": []}
-
+                column_name = next(value for value in column_match.groups() if value is not None)
+                columns.append(column_name)
+                if re.search(r"\bUNIQUE\b", line, re.IGNORECASE):
+                    expected[matching_name]["indexes"].append({"name": "", "columns": [column_name], "unique": True})
     for index_match in re.finditer(r"CREATE INDEX\s+(.+?)\s+ON\s+(.+?)(?:\s+USING\s+\w+)?\s*\((.*?)\);", script, re.IGNORECASE | re.DOTALL):
         index_expression, table_expression, columns_expression = index_match.groups()
         table_name = _identifier_name(table_expression.split(".")[-1])
@@ -1153,7 +1163,7 @@ def _metadata_expected_structure(config: MetaTableConfig, db_type: str) -> dict[
 def _metadata_actual_structure(connection, schema_name: str, table_name: str) -> dict[str, Any]:
     inspector = inspect(connection)
     columns = [column.get("name") for column in inspector.get_columns(table_name, schema=schema_name)]
-    indexes = [{"name": index.get("name"), "columns": index.get("column_names") or []} for index in inspector.get_indexes(table_name, schema=schema_name)]
+    indexes = [{"name": index.get("name"), "columns": index.get("column_names") or [], "unique": bool(index.get("unique", False))} for index in inspector.get_indexes(table_name, schema=schema_name)]
     return {"columns": columns, "indexes": indexes}
 
 
@@ -1795,6 +1805,9 @@ def _layout_change_fingerprint(item: dict, before_snapshot_id: int, after_snapsh
 
 
 def _persist_layout_changes(session: Session, before: SchemaSnapshot, after: SchemaSnapshot, diff: dict[str, Any]) -> int:
+    # 구조 변경 알람은 현재 등록된 메타 테이블에 대해서만 생성한다.
+    source_name = (after.payload or {}).get("source") or (before.payload or {}).get("source")
+    registered_targets = set(session.execute(select(MetaTableExt.owner, MetaTableExt.table_name).where(MetaTableExt.instance_name == source_name)).all())
     # A skipped schema means absence cannot safely be interpreted as a deletion.
     skipped = {(item.get("name") if isinstance(item, dict) else str(item)) for item in ((after.payload or {}).get("skipped_schemas") or [])}
     persisted = 0
@@ -1803,6 +1816,9 @@ def _persist_layout_changes(session: Session, before: SchemaSnapshot, after: Sch
     candidates += [(item, False, False) for item in diff.get("changed", [])]
     for item, added, removed in candidates:
         kind = item.get("kind") or ""
+        target_table = item.get("table") or (item.get("name") if kind in {"table", "view"} else None)
+        if not target_table or (item.get("schema"), target_table) not in registered_targets:
+            continue
         change_type, risk = _layout_change_type(kind, item.get("before"), item.get("after") or item.get("value"), added, removed)
         if not change_type:
             continue
@@ -1854,7 +1870,8 @@ def list_layout_changes(
     page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
     session: Session = Depends(get_session), _: User = Depends(require("metadata:read")),
 ):
-    query = select(MetaLayoutChange)
+    registered_layout_target = select(MetaTableExt.id).where(MetaTableExt.instance_name == MetaLayoutChange.instance_name, MetaTableExt.owner == MetaLayoutChange.owner, MetaTableExt.table_name == MetaLayoutChange.table_name).exists()
+    query = select(MetaLayoutChange).where(registered_layout_target)
     if source_id is not None:
         query = query.where(MetaLayoutChange.after_snapshot_id.in_(select(SchemaSnapshot.id).where(SchemaSnapshot.data_source_id == source_id)))
     if status:
