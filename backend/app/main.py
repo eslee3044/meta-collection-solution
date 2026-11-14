@@ -237,13 +237,13 @@ def change_password(payload: PasswordChangeIn, session: Session = Depends(get_se
 @app.get("/api/dashboard")
 def dashboard(session: Session = Depends(get_session), _: User = Depends(current_user)):
     latest = session.scalars(select(CollectionRun).order_by(desc(CollectionRun.started_at)).limit(8)).all()
-    pending_changes = session.scalars(select(MetaLayoutChange).where(MetaLayoutChange.status == "REVIEW_REQUIRED").order_by(desc(MetaLayoutChange.detected_at)).limit(5)).all()
+    pending_changes = session.scalars(select(MetaLayoutChange).where(MetaLayoutChange.status.in_(["DETECTED", "REVIEW_REQUIRED", "APPROVED"])).order_by(desc(MetaLayoutChange.detected_at)).limit(5)).all()
     return {
         "sources": session.scalar(select(func.count()).select_from(DataSource)) or 0,
         "active_jobs": session.scalar(select(func.count()).select_from(CollectionJob).where(CollectionJob.is_active.is_(True))) or 0,
         "objects": session.scalar(select(func.coalesce(func.sum(CollectionRun.object_count), 0)).where(CollectionRun.status == "success")) or 0,
         "failed_runs": session.scalar(select(func.count()).select_from(CollectionRun).where(CollectionRun.status == "failed")) or 0,
-        "layout_changes_pending": session.scalar(select(func.count()).select_from(MetaLayoutChange).where(MetaLayoutChange.status.in_(["DETECTED", "REVIEW_REQUIRED"]))) or 0,
+        "layout_changes_pending": session.scalar(select(func.count()).select_from(MetaLayoutChange).where(MetaLayoutChange.status.in_(["DETECTED", "REVIEW_REQUIRED", "APPROVED"]))) or 0,
         "recent_layout_changes": [{"change_id": item.id, "table_name": item.table_name, "column_name": item.column_name, "change_type": item.change_type, "risk_level": item.risk_level, "status": item.status, "detected_at": item.detected_at} for item in pending_changes],
         "recent_runs": [RunOut.model_validate(item) for item in latest],
     }
@@ -1095,8 +1095,76 @@ def _meta_table_script(config: MetaTableConfig, db_type: str) -> str:
     return chr(10).join(lines)
 
 
+def _compare_metadata_structure(expected: dict[str, Any], actual: dict[str, Any]) -> list[str]:
+    differences: list[str] = []
+    expected_columns = {str(name).upper() for name in expected.get("columns", [])}
+    actual_columns = {str(name).upper() for name in actual.get("columns", [])}
+    for name in sorted(expected_columns - actual_columns):
+        differences.append(f"누락 컬럼: {name}")
+    for name in sorted(actual_columns - expected_columns):
+        differences.append(f"추가 컬럼: {name}")
+
+    def index_key(index: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
+        return (str(index.get("name", "")).upper(), tuple(str(column).upper() for column in index.get("columns", [])))
+
+    expected_indexes = {index_key(index) for index in expected.get("indexes", [])}
+    actual_indexes = {index_key(index) for index in actual.get("indexes", [])}
+    for name, columns in sorted(expected_indexes - actual_indexes):
+        differences.append(f"누락 인덱스: {name} ({', '.join(columns)})")
+    for name, columns in sorted(actual_indexes - expected_indexes):
+        differences.append(f"추가 또는 불일치 인덱스: {name} ({', '.join(columns)})")
+    return differences
+
+
+def _identifier_name(value: str) -> str:
+    return value.strip().strip('"`[]').upper()
+
+
+def _metadata_expected_structure(config: MetaTableConfig, db_type: str) -> dict[str, dict[str, Any]]:
+    script = _meta_table_script(config, db_type)
+    expected: dict[str, dict[str, Any]] = {}
+    table_names = [config.tables_table_name, config.columns_table_name, "TB_META_LAYOUT_CHANGES_EXT", "TB_META_LAYOUT_CHANGE_ACTIONS_EXT"]
+    for block in re.finditer(r"CREATE TABLE\s+(.+?)\s*\((.*?)\);", script, re.IGNORECASE | re.DOTALL):
+        table_expression, body = block.groups()
+        table_name = _identifier_name(table_expression.split(".")[-1])
+        matching_name = next((name for name in table_names if _identifier_name(name) == table_name), None)
+        if not matching_name:
+            continue
+        columns: list[str] = []
+        for line in body.splitlines():
+            line = line.strip().rstrip(",")
+            if not line or line.upper().startswith(("PRIMARY KEY", "CONSTRAINT", "UNIQUE", "FOREIGN KEY")):
+                continue
+            column_match = re.match(r"(?:\"([^\"]+)\"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z0-9_]+))\s+", line)
+            if column_match:
+                columns.append(next(value for value in column_match.groups() if value is not None))
+        expected[matching_name] = {"columns": columns, "indexes": []}
+
+    for index_match in re.finditer(r"CREATE INDEX\s+(.+?)\s+ON\s+(.+?)(?:\s+USING\s+\w+)?\s*\((.*?)\);", script, re.IGNORECASE | re.DOTALL):
+        index_expression, table_expression, columns_expression = index_match.groups()
+        table_name = _identifier_name(table_expression.split(".")[-1])
+        matching_name = next((name for name in table_names if _identifier_name(name) == table_name), None)
+        if matching_name in expected:
+            index_name = _identifier_name(index_expression.split(".")[-1])
+            expected[matching_name]["indexes"].append({"name": index_name, "columns": [_identifier_name(value) for value in columns_expression.split(",")]})
+    return expected
+
+
+def _metadata_actual_structure(connection, schema_name: str, table_name: str) -> dict[str, Any]:
+    inspector = inspect(connection)
+    columns = [column.get("name") for column in inspector.get_columns(table_name, schema=schema_name)]
+    indexes = [{"name": index.get("name"), "columns": index.get("column_names") or []} for index in inspector.get_indexes(table_name, schema=schema_name)]
+    return {"columns": columns, "indexes": indexes}
+
+
+def _metadata_table_has_rows(connection, schema_name: str, table_name: str) -> bool:
+    preparer = connection.dialect.identifier_preparer
+    qualified_name = f"{preparer.quote_schema(schema_name)}.{preparer.quote(table_name)}"
+    return connection.execute(text(f"SELECT 1 FROM {qualified_name}")).first() is not None
+
+
 @app.post("/api/metadata/register-script/execute")
-def execute_metadata_register_script(session: Session = Depends(get_session), _: User = Depends(require("admin:*"))):
+def execute_metadata_register_script(payload: dict[str, bool] | None = None, session: Session = Depends(get_session), _: User = Depends(require("admin:*"))):
     config = session.get(MetaTableConfig, 1)
     if not config:
         raise HTTPException(400, "메타 테이블 조회 설정이 없습니다.")
@@ -1123,6 +1191,37 @@ def execute_metadata_register_script(session: Session = Depends(get_session), _:
                 inspector = inspect(connection)
                 existing = {name for name in table_names if inspector.has_table(name, schema=config.schema_name)}
                 missing = [name for name in table_names if name not in existing]
+                expected = _metadata_expected_structure(config, db_type)
+                mismatches: dict[str, list[str]] = {}
+                for name in sorted(existing):
+                    differences = _compare_metadata_structure(expected.get(name, {}), _metadata_actual_structure(connection, config.schema_name, name))
+                    if differences:
+                        mismatches[name] = differences
+
+                if mismatches:
+                    data_tables = [name for name in mismatches if _metadata_table_has_rows(connection, config.schema_name, name)]
+                    if data_tables:
+                        details = [f"{name}: {'; '.join(mismatches[name])}" for name in sorted(mismatches)]
+                        raise HTTPException(status_code=409, detail={
+                            "code": "META_TABLES_STRUCTURE_DATA_EXISTS",
+                            "message": "컬럼·인덱스가 다르지만 데이터가 존재하여 재생성할 수 없습니다.",
+                            "tables": data_tables,
+                            "differences": details,
+                        })
+                    if not bool((payload or {}).get("recreate")):
+                        details = [f"{name}: {'; '.join(mismatches[name])}" for name in sorted(mismatches)]
+                        raise HTTPException(status_code=409, detail={
+                            "code": "META_TABLES_STRUCTURE_MISMATCH",
+                            "message": "메타 테이블의 컬럼·인덱스 구성이 표준 정의와 다릅니다.",
+                            "tables": sorted(mismatches),
+                            "differences": details,
+                        })
+                    preparer = connection.dialect.identifier_preparer
+                    for name in sorted(mismatches, reverse=True):
+                        qualified_name = f"{preparer.quote_schema(config.schema_name)}.{preparer.quote(name)}"
+                        connection.exec_driver_sql(f"DROP TABLE {qualified_name}")
+                    missing.extend(name for name in mismatches if name not in missing)
+
                 if missing:
                     script = _meta_table_script(config, db_type)
                     statements = [statement.strip() for statement in script.split(";") if statement.strip()]
@@ -1143,7 +1242,10 @@ def execute_metadata_register_script(session: Session = Depends(get_session), _:
                             index_target = next((table for index, table in index_targets.items() if index.lower() in statement.lower()), None)
                             if index_target in missing:
                                 connection.exec_driver_sql(statement)
-                return {"status": "created" if missing else "ready", "created_tables": missing, "existing_tables": sorted(existing), "failed_tables": []}
+                recreated = sorted(mismatches)
+                return {"status": "recreated" if recreated else "created" if missing else "ready", "created_tables": [name for name in missing if name not in recreated], "recreated_tables": recreated, "existing_tables": sorted(existing - set(recreated)), "failed_tables": []}
+    except HTTPException:
+        raise
     except Exception as error:
         raise HTTPException(502, f"메타 테이블 생성에 실패했습니다: {type(error).__name__}") from error
 
