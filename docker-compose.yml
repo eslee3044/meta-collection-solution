@@ -40,6 +40,7 @@ services:
       METAVAULT_DATALAKE_POSTGRES_NAME: "${METAVAULT_DATALAKE_POSTGRES_NAME:-}"
       METAVAULT_DATALAKE_POSTGRES_USER: "${METAVAULT_DATALAKE_POSTGRES_USER:-}"
       METAVAULT_DATALAKE_POSTGRES_PASSWORD: "${METAVAULT_DATALAKE_POSTGRES_PASSWORD:-}"
+      METAVAULT_LOCAL_AI_URL: "${METAVAULT_LOCAL_AI_URL:-http://host.docker.internal:11434}"
     volumes:
       - ./sample:/app/sample:ro
       - ./datalake:/var/lib/metavault/datalake

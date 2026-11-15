@@ -25,11 +25,12 @@ from .datalake import datalake_root
 from .datalake_query import DatalakeTableNotFound, list_l0_tables, preview_l0_table
 from .load_service import run_full_load
 from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaColumnExt, MetaLayoutChange, MetaLayoutChangeAction, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
+from .ai_description import suggest_descriptions, suggest_table_description
 from .capabilities import assert_supported_db_type
 from .collector import available_schema_names, normalize_collection_items, source_engine, test_source
 from .catalog.collection_permissions import check_collection_catalog_permissions
 from .scheduler import enqueue_run, request_run_cancel, start_scheduler, stop_scheduler, sync_jobs
-from .schemas import DataSourceIn, DataSourceOut, FullLoadIn, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut
+from .schemas import DataSourceIn, DataSourceOut, DescriptionPreviewIn, FullLoadIn, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut
 from .security import create_token, decode_token, decrypt_json, encrypt_json, hash_password, verify_password
 from .seed import seed
 
@@ -90,8 +91,24 @@ async def lifespan(_: FastAPI):
             }
             for column_name, definition in table_tracking_columns.items():
                 connection.execute(text(f'ALTER TABLE "EAPET"."TB_META_TABLES_EXT" ADD COLUMN IF NOT EXISTS "{column_name}" {definition}'))
+            connection.execute(text("ALTER TABLE meta_table_config ADD COLUMN IF NOT EXISTS target_database_name VARCHAR(255) NOT NULL DEFAULT 'BigQuery'"))
+            connection.execute(text("ALTER TABLE meta_table_config ADD COLUMN IF NOT EXISTS description_ai_enabled BOOLEAN NOT NULL DEFAULT FALSE"))
+            connection.execute(text("ALTER TABLE meta_table_config ADD COLUMN IF NOT EXISTS description_ai_provider VARCHAR(30) NOT NULL DEFAULT 'rules'"))
+            connection.execute(text("ALTER TABLE meta_table_config ADD COLUMN IF NOT EXISTS description_ai_model VARCHAR(120) NOT NULL DEFAULT 'qwen3:latest'"))
             for column_name, definition in column_tracking_columns.items():
                 connection.execute(text(f'ALTER TABLE "EAPET"."TB_META_COLUMNS_EXT" ADD COLUMN IF NOT EXISTS "{column_name}" {definition}'))
+    if engine.dialect.name != "postgresql":
+        config_columns = {column["name"] for column in inspect(engine).get_columns("meta_table_config")}
+        config_migrations = {
+            "target_database_name": "VARCHAR(255) NOT NULL DEFAULT 'BigQuery'",
+            "description_ai_enabled": "BOOLEAN NOT NULL DEFAULT FALSE",
+            "description_ai_provider": "VARCHAR(30) NOT NULL DEFAULT 'rules'",
+            "description_ai_model": "VARCHAR(120) NOT NULL DEFAULT 'qwen3:latest'",
+        }
+        for column_name, definition in config_migrations.items():
+            if column_name not in config_columns:
+                with engine.begin() as connection:
+                    connection.execute(text(f"ALTER TABLE meta_table_config ADD COLUMN {column_name} {definition}"))
     ensure_integration_views(engine)
     columns = {column["name"] for column in inspect(engine).get_columns("collection_jobs")}
     if "collect_storage" not in columns:
@@ -238,7 +255,7 @@ def change_password(payload: PasswordChangeIn, session: Session = Depends(get_se
 @app.get("/api/dashboard")
 def dashboard(session: Session = Depends(get_session), _: User = Depends(current_user)):
     latest = session.scalars(select(CollectionRun).order_by(desc(CollectionRun.started_at)).limit(8)).all()
-    registered_layout_target = select(MetaTableExt.id).where(MetaTableExt.instance_name == MetaLayoutChange.instance_name, MetaTableExt.owner == MetaLayoutChange.owner, MetaTableExt.table_name == MetaLayoutChange.table_name).exists()
+    registered_layout_target = select(MetaTableExt.system_cd).where(MetaTableExt.instance_name == MetaLayoutChange.instance_name, MetaTableExt.owner == MetaLayoutChange.owner, MetaTableExt.table_name == MetaLayoutChange.table_name).exists()
     pending_layout_query = select(MetaLayoutChange).where(MetaLayoutChange.status.in_(["DETECTED", "REVIEW_REQUIRED", "APPROVED"]), registered_layout_target)
     pending_changes = session.scalars(pending_layout_query.order_by(desc(MetaLayoutChange.detected_at)).limit(5)).all()
     return {
@@ -438,6 +455,10 @@ def update_meta_table_config(payload: MetaTableConfigIn, session: Session = Depe
     config.schema_name = payload.schema_name
     config.tables_table_name = payload.tables_table_name
     config.columns_table_name = payload.columns_table_name
+    config.target_database_name = payload.target_database_name
+    config.description_ai_enabled = payload.description_ai_enabled
+    config.description_ai_provider = payload.description_ai_provider
+    config.description_ai_model = payload.description_ai_model
     session.commit()
     if config.source_type == "external":
         source = session.get(DataSource, config.external_source_id) if config.external_source_id else None
@@ -1001,7 +1022,7 @@ def _meta_table_script(config: MetaTableConfig, db_type: str) -> str:
         f"        {q('sql_insp_yn')} {varchar(1)} NULL,",
         f"        {q('sql_src_tcount')} {varchar(4000)} NULL,",
         f"        {q('sql_tgt_tcount')} {varchar(4000)} NULL,",
-        f"        {q('sql_tgt_pk_dup')} {varchar(4000)} NULL,",
+        f"        {q('sql_tgt_pk_dup')} INTEGER NULL,",
         f"        {q('SRC_DATA_SOURCE_ID')} INTEGER NULL,",
         f"        {q('SRC_SNAPSHOT_ID')} INTEGER NULL,",
         f"        {q('SRC_SCHEMA_FINGERPRINT')} {varchar(64)} NULL,",
@@ -1399,13 +1420,14 @@ def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapsho
             table_count = column_count = 0
             audit_now = datetime.now(timezone.utc)
             source_database = snapshot.payload.get("database") or ""
+            target_database_name = config.target_database_name or "BigQuery"
             for table_name in payload.table_names:
                 owner, table, object_type = available[table_name]
                 table_key = {"system_cd": payload.system_cd, "instance_name": snapshot.payload.get("source", ""), "postfix": payload.postfix, "owner": owner, "table_name": table_name}
                 target_name = _target_table_name(table_name, payload.target_name_suffix)
                 rules = _informatica_name_rules(payload.system_cd, payload.instance_div_cd)
                 table_comment = (payload.table_comments or {}).get(table_name, table.get("comment") or "")
-                values = {**table_key, "database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "src_data_source_id": snapshot.data_source_id, "src_snapshot_id": snapshot.id, "src_schema_fingerprint": snapshot.fingerprint, "layout_status": "UNCHANGED", "layout_change_yn": "N", "metadata_sync_status": "APPLIED", "is_active": "Y", "createdon": audit_now, "createdby": actor, "lastupdated": audit_now, "updatedby": actor, "partition_col_modifiable_yn": "Y"}
+                values = {**table_key, "database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": target_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "src_data_source_id": snapshot.data_source_id, "src_snapshot_id": snapshot.id, "src_schema_fingerprint": snapshot.fingerprint, "layout_status": "UNCHANGED", "layout_change_yn": "N", "metadata_sync_status": "APPLIED", "is_active": "Y", "createdon": audit_now, "createdby": actor, "lastupdated": audit_now, "updatedby": actor, "partition_col_modifiable_yn": "Y"}
                 values = {name: value for name, value in values.items() if name in table_columns}
                 where = and_(*[table_columns[key] == table_key[key] for key in table_keys])
                 existing_table = connection.execute(select(tables).where(where)).first()
@@ -1462,6 +1484,7 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
     if missing:
         raise HTTPException(400, f"수집 결과에 없는 테이블이 포함되어 있습니다: {', '.join(missing[:10])}")
     source_database = snapshot.payload.get("database") or ""
+    target_database_name = config.target_database_name if config else "BigQuery"
     audit_now = datetime.now(timezone.utc)
     audit_actor = user.email or user.name
     table_count = column_count = 0
@@ -1475,7 +1498,7 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
         if not target:
             target = MetaTableExt(**table_key, createdon=audit_now, createdby=audit_actor)
             session.add(target)
-        for key, value in {"database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": payload.tgt_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "src_data_source_id": snapshot.data_source_id, "src_snapshot_id": snapshot.id, "src_schema_fingerprint": snapshot.fingerprint, "layout_status": "UNCHANGED", "layout_change_yn": "N", "metadata_sync_status": "APPLIED", "is_active": "Y", "lastupdated": audit_now, "updatedby": audit_actor, "partition_col_modifiable_yn": "Y"}.items():
+        for key, value in {"database_name": source_database, "etl_conn_div_cd": payload.etl_conn_div_cd, "etl_conn_nm": payload.etl_conn_nm, "tgt_ds_cd": payload.tgt_ds_cd, "tgt_table_name": target_name, "tgt_database_name": target_database_name, "instance_div_cd": payload.instance_div_cd, "comments": table_comment, **rules, "table_type": object_type, "src_data_source_id": snapshot.data_source_id, "src_snapshot_id": snapshot.id, "src_schema_fingerprint": snapshot.fingerprint, "layout_status": "UNCHANGED", "layout_change_yn": "N", "metadata_sync_status": "APPLIED", "is_active": "Y", "lastupdated": audit_now, "updatedby": audit_actor, "partition_col_modifiable_yn": "Y"}.items():
             setattr(target, key, value)
         table_count += 1
         pk_names = set((table.get("primary_key") or {}).get("constrained_columns") or [])
@@ -1585,9 +1608,21 @@ def registered_metadata(
     for column in columns:
         key = (column.system_cd, column.instance_name, column.postfix, column.owner, column.table_name)
         grouped.setdefault(key, []).append({"column_name": column.column_name, "column_id": column.column_id, "data_type": column.data_type, "data_length": column.data_length, "data_precision": column.data_precision, "data_scale": column.data_scale, "null_yn": column.null_yn, "pk_yn": column.pk_yn, "partition_key_yn": column.partition_key_yn, "update_base_yn": column.update_base_yn, "comments": column.comments})
-    items = [{"system_cd": table.system_cd, "instance_name": table.instance_name, "postfix": table.postfix, "owner": table.owner, "table_name": table.table_name, "table_type": table.table_type or "TABLE", "database_name": table.database_name, "etl_conn_div_cd": table.etl_conn_div_cd, "etl_conn_nm": table.etl_conn_nm, "tgt_ds_cd": table.tgt_ds_cd, "tgt_table_name": table.tgt_table_name, "tgt_database_name": table.tgt_database_name, "comments": table.comments, "columns": grouped.get((table.system_cd, table.instance_name, table.postfix, table.owner, table.table_name), [])} for table in tables]
+    items = [{"system_cd": table.system_cd, "instance_name": table.instance_name, "postfix": table.postfix, "owner": table.owner, "table_name": table.table_name, "table_type": table.table_type or "TABLE", "database_name": table.database_name, "etl_conn_div_cd": table.etl_conn_div_cd, "etl_conn_nm": table.etl_conn_nm, "tgt_ds_cd": table.tgt_ds_cd, "tgt_table_name": table.tgt_table_name, "tgt_database_name": table.tgt_database_name, "comments": table.comments, "lastupdated": table.lastupdated, "createdon": table.createdon, "columns": grouped.get((table.system_cd, table.instance_name, table.postfix, table.owner, table.table_name), [])} for table in tables]
     sources = sorted({source for source in session.scalars(select(MetaTableExt.instance_name).distinct()).all() if source})
     return {"items": items, "total": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size, "sources": sources, "source_counts": source_counts}
+
+
+@app.post("/api/metadata/registered/descriptions/preview")
+def preview_registered_descriptions(payload: DescriptionPreviewIn, session: Session = Depends(get_session), _: User = Depends(require("metadata:write"))):
+    config = session.get(MetaTableConfig, 1)
+    if not config or not config.description_ai_enabled:
+        raise HTTPException(409, "시스템 관리에서 설명 자동생성을 먼저 활성화하세요.")
+    items = suggest_descriptions([column.model_dump() for column in payload.columns], config.description_ai_provider, config.description_ai_model)
+    table = None
+    if payload.table and not str(payload.table.comments or "").strip():
+        table = suggest_table_description(payload.table.table_name, [column.model_dump() for column in payload.table.columns], config.description_ai_provider, config.description_ai_model)
+    return {"items": items, "table": table, "provider": config.description_ai_provider, "model": config.description_ai_model}
 
 
 @app.delete("/api/metadata/registered")
@@ -1634,8 +1669,11 @@ def delete_registered_metadata(payload: dict, session: Session = Depends(get_ses
 
 @app.put("/api/metadata/registered")
 def update_registered_metadata(payload: dict, session: Session = Depends(get_session), user: User = Depends(require("metadata:write"))):
-    key = (payload.get("system_cd"), payload.get("instance_name"), payload.get("postfix"), payload.get("owner"), payload.get("table_name"))
-    if any(not isinstance(value, str) or not value for value in key[:2] + key[3:]) or not isinstance(key[2], str):
+    key_names = ("system_cd", "instance_name", "postfix", "owner", "table_name")
+    original = (payload.get("original_key") if isinstance(payload.get("original_key"), dict) else None) or payload
+    key = tuple(original.get(name) for name in key_names)
+    new_key = tuple(payload.get(name) for name in key_names)
+    if any(not isinstance(value, str) or not value for value in key[:2] + key[3:]) or not isinstance(key[2], str) or any(not isinstance(value, str) or not value for value in new_key[:2] + new_key[3:]) or not isinstance(new_key[2], str):
         raise HTTPException(422, "등록 메타의 키 값은 올바른 문자열이어야 합니다.")
     config = session.get(MetaTableConfig, 1)
     audit_now = datetime.now(timezone.utc)
@@ -1688,6 +1726,16 @@ def update_registered_metadata(payload: dict, session: Session = Depends(get_ses
     table = session.get(MetaTableExt, key)
     if not table:
         raise HTTPException(404, "등록된 메타 테이블을 찾을 수 없습니다.")
+    if new_key != key and session.get(MetaTableExt, new_key):
+        raise HTTPException(409, "변경할 등록 메타 키가 이미 존재합니다.")
+    related_columns = session.scalars(select(MetaColumnExt).where(
+        MetaColumnExt.system_cd == key[0], MetaColumnExt.instance_name == key[1], MetaColumnExt.postfix == key[2], MetaColumnExt.owner == key[3], MetaColumnExt.table_name == key[4]
+    )).all()
+    for field, value in zip(key_names, new_key):
+        setattr(table, field, value)
+    for column in related_columns:
+        for field, value in zip(key_names, new_key):
+            setattr(column, field, value)
     for field in ("database_name", "etl_conn_div_cd", "etl_conn_nm", "tgt_ds_cd", "tgt_table_name", "tgt_database_name", "comments", "partition_key_yn", "cluster_key_yn", "update_base_yn", "to_single_byte_yn", "substr_yn"):
         if field in payload:
             setattr(table, field, payload[field])
@@ -1704,10 +1752,7 @@ def update_registered_metadata(payload: dict, session: Session = Depends(get_ses
                 raise HTTPException(422, f"{field}는 숫자만 입력할 수 있습니다.")
         valid_items.append(item)
     column_names = [item["column_name"] for item in valid_items]
-    columns = session.scalars(select(MetaColumnExt).where(
-        MetaColumnExt.system_cd == key[0], MetaColumnExt.instance_name == key[1], MetaColumnExt.postfix == key[2], MetaColumnExt.owner == key[3], MetaColumnExt.table_name == key[4], MetaColumnExt.column_name.in_(column_names)
-    )).all()
-    columns_by_name = {column.column_name: column for column in columns}
+    columns_by_name = {column.column_name: column for column in related_columns}
     for item in valid_items:
         column = columns_by_name.get(item["column_name"])
         if not column:
@@ -1871,7 +1916,7 @@ def list_layout_changes(
     page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
     session: Session = Depends(get_session), _: User = Depends(require("metadata:read")),
 ):
-    registered_layout_target = select(MetaTableExt.id).where(MetaTableExt.instance_name == MetaLayoutChange.instance_name, MetaTableExt.owner == MetaLayoutChange.owner, MetaTableExt.table_name == MetaLayoutChange.table_name).exists()
+    registered_layout_target = select(MetaTableExt.system_cd).where(MetaTableExt.instance_name == MetaLayoutChange.instance_name, MetaTableExt.owner == MetaLayoutChange.owner, MetaTableExt.table_name == MetaLayoutChange.table_name).exists()
     query = select(MetaLayoutChange).where(registered_layout_target)
     if source_id is not None:
         query = query.where(MetaLayoutChange.after_snapshot_id.in_(select(SchemaSnapshot.id).where(SchemaSnapshot.data_source_id == source_id)))

@@ -202,8 +202,7 @@ class MetaTableExt(Base):
     sql_insp_yn: Mapped[str | None] = mapped_column(String(1), nullable=True)
     sql_src_count: Mapped[str | None] = mapped_column("sql_src_tcount", String(4000), nullable=True)
     sql_tgt_count: Mapped[str | None] = mapped_column("sql_tgt_tcount", String(4000), nullable=True)
-    sql_tgt_pk_dup: Mapped[str | None] = mapped_column("sql_tgt_pk_dup", String(4000), nullable=True)
-
+    sql_tgt_pk_dup: Mapped[int | None] = mapped_column("sql_tgt_pk_dup", Integer, nullable=True)
 
 class MetaColumnExt(Base):
     __tablename__ = "TB_META_COLUMNS_EXT"
@@ -297,3 +296,7 @@ class MetaTableConfig(TimestampMixin, Base):
     schema_name: Mapped[str] = mapped_column(String(255), default="EAPET")
     tables_table_name: Mapped[str] = mapped_column(String(255), default="TB_META_TABLES_EXT")
     columns_table_name: Mapped[str] = mapped_column(String(255), default="TB_META_COLUMNS_EXT")
+    target_database_name: Mapped[str] = mapped_column(String(255), default="BigQuery")
+    description_ai_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    description_ai_provider: Mapped[str] = mapped_column(String(30), default="rules", nullable=False)
+    description_ai_model: Mapped[str] = mapped_column(String(120), default="qwen3:latest", nullable=False)

@@ -1,6 +1,20 @@
 const API = import.meta.env.VITE_API_URL || ''
 const SESSION_EXPIRED_EVENT = 'metavault:session-expired'
 
+function formatApiDetail(detail: unknown): string {
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) return detail.map(item => formatApiDetail(item)).filter(Boolean).join('\n') || '요청을 처리하지 못했습니다.'
+  if (detail && typeof detail === 'object') {
+    const item = detail as Record<string, unknown>
+    const location = Array.isArray(item.loc) ? item.loc.join(' > ') : ''
+    const message = typeof item.msg === 'string' ? item.msg : typeof item.message === 'string' ? item.message : ''
+    if (location && message) return `${location}: ${message}`
+    if (message) return message
+    try { return JSON.stringify(detail) } catch { return '요청을 처리하지 못했습니다.' }
+  }
+  return '요청을 처리하지 못했습니다.'
+}
+
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message) }
 }
@@ -36,7 +50,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (response.status === 204) return undefined as T
   const body = await response.json().catch(() => ({}))
-  if (!response.ok) throw new ApiError(response.status, body.detail || '요청을 처리하지 못했습니다.')
+  if (!response.ok) throw new ApiError(response.status, formatApiDetail(body.detail))
   return body
 }
 

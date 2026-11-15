@@ -160,12 +160,36 @@ class RoleIn(BaseModel):
     menu_ids: list[int] = []
 
 
+class DescriptionColumnIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    column_name: str = Field(min_length=1, max_length=255)
+    data_type: str = Field(default="", max_length=120)
+    comments: str | None = Field(default=None, max_length=2000)
+    description: str | None = Field(default=None, max_length=2000)
+
+
+class DescriptionTableIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    table_name: str = Field(min_length=1, max_length=255)
+    comments: str | None = Field(default=None, max_length=4000)
+    columns: list[DescriptionColumnIn] = Field(default_factory=list, max_length=500)
+
+
+class DescriptionPreviewIn(BaseModel):
+    table: DescriptionTableIn | None = None
+    columns: list[DescriptionColumnIn] = Field(default_factory=list, max_length=500)
+
+
 class MetaTableConfigIn(BaseModel):
     source_type: Literal["internal", "external"] = "internal"
     external_source_id: int | None = None
     schema_name: str = Field(default="EAPET", min_length=1, max_length=255)
     tables_table_name: str = Field(default="TB_META_TABLES_EXT", min_length=1, max_length=255)
     columns_table_name: str = Field(default="TB_META_COLUMNS_EXT", min_length=1, max_length=255)
+    target_database_name: str = Field(default="BigQuery", min_length=1, max_length=255)
+    description_ai_enabled: bool = False
+    description_ai_provider: Literal["rules", "ollama"] = "rules"
+    description_ai_model: str = Field(default="qwen3:latest", min_length=1, max_length=120)
 
 
 class MetaTableConfigOut(MetaTableConfigIn):
