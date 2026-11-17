@@ -38,3 +38,44 @@ def test_compare_metadata_structure_accepts_database_generated_unique_index_name
     }
 
     assert _compare_metadata_structure(expected, actual) == []
+
+
+def test_meta_pk_candidate_model_has_required_columns_and_indexes():
+    from app.models import MetaPkCandidate
+
+    columns = {column.name: column for column in MetaPkCandidate.__table__.columns}
+    assert set(columns) == {
+        "CANDIDATE_ID", "SYSTEM_CD", "INSTANCE_NAME", "POSTFIX", "OWNER", "TABLE_NAME", "OBJECT_TYPE",
+        "SRC_DATA_SOURCE_ID", "SRC_SNAPSHOT_ID", "CANDIDATE_RANK", "CANDIDATE_COLUMNS_JSON", "CANDIDATE_FINGERPRINT",
+        "SOURCE_TYPE", "METHOD", "MODEL_NAME", "CONFIDENCE", "REASON", "STATUS", "VALIDATION_STATUS", "ROW_COUNT",
+        "NULL_COUNT", "DUPLICATE_GROUP_COUNT", "VALIDATED_AT", "VALIDATION_MESSAGE", "CREATED_BY", "CREATED_AT",
+        "REVIEWED_BY", "REVIEWED_AT", "APPLIED_BY", "APPLIED_AT",
+    }
+    assert columns["CANDIDATE_ID"].primary_key
+    assert columns["CANDIDATE_FINGERPRINT"].unique
+    assert columns["SRC_DATA_SOURCE_ID"].nullable
+    assert columns["SRC_SNAPSHOT_ID"].nullable
+    index_columns = {tuple(column.name for column in index.columns): index for index in MetaPkCandidate.__table__.indexes}
+    assert ("SYSTEM_CD", "INSTANCE_NAME", "POSTFIX", "OWNER", "TABLE_NAME", "STATUS") in index_columns
+    assert ("SRC_SNAPSHOT_ID",) in index_columns
+
+
+def test_metadata_expected_structure_includes_pk_candidates_for_internal_and_external_ddl():
+    from app.main import _metadata_expected_structure
+    from app.models import MetaTableConfig
+
+    config = MetaTableConfig(
+        schema_name="EAPET",
+        tables_table_name="TB_META_TABLES_EXT",
+        columns_table_name="TB_META_COLUMNS_EXT",
+    )
+    for db_type in ("postgresql", "mysql", "mssql"):
+        expected = _metadata_expected_structure(config, db_type)
+        candidate = expected["TB_META_PK_CANDIDATES_EXT"]
+        assert "CANDIDATE_ID" in candidate["columns"]
+        assert "CANDIDATE_COLUMNS_JSON" in candidate["columns"]
+        assert {tuple(index["columns"]) for index in candidate["indexes"]} >= {
+            ("CANDIDATE_FINGERPRINT",),
+            ("SYSTEM_CD", "INSTANCE_NAME", "POSTFIX", "OWNER", "TABLE_NAME", "STATUS"),
+            ("SRC_SNAPSHOT_ID",),
+        }

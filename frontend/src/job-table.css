@@ -302,7 +302,21 @@ td.row-actions button {
   }
 }
 
-/* Keep execution-history actions on one line inside the panel header. */
+.panel-head .source-actions select {
+  height: 34px;
+  min-width: 112px;
+  padding: 0 28px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: #40536f;
+  font: inherit;
+  font-size: 12px;
+}
+
+.run-history-actions {
+  gap: 8px;
+}
 .panel-head .source-actions {
   display: flex !important;
   flex-direction: row !important;

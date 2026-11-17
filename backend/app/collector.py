@@ -360,6 +360,21 @@ def _collect_select_permissions(connection: Connection, source: DataSource, sche
     return _select_permissions(connection, source, schema_name)
 
 
+def _normalize_indexes(raw_indexes: list[dict] | None) -> list[dict]:
+    normalized: list[dict] = []
+    for raw_index in raw_indexes or []:
+        index = dict(raw_index)
+        columns = [str(column) for column in (index.get("column_names") or index.get("columns") or []) if column]
+        index["column_names"] = columns
+        index["columns"] = columns
+        index["unique"] = bool(index.get("unique", False))
+        dialect_options = index.get("dialect_options") or {}
+        if isinstance(dialect_options, dict) and dialect_options:
+            index["options"] = {str(key): str(value) for key, value in dialect_options.items()}
+        normalized.append(index)
+    return normalized
+
+
 def _source_table_names(connection: Connection, inspector, source: DataSource, schema_name: str) -> list[str]:
     return get_catalog_provider(source, inspector).table_names(connection, schema_name)
 
@@ -440,7 +455,7 @@ def collect_schema(
                         "columns": provider_columns.get(table_name, []) if source.db_type == "oracle" else _safe(lambda: _source_columns(connection, inspector, source, schema_name, table_name), []),
                         "primary_key": _safe(lambda: inspector.get_pk_constraint(table_name, schema=schema_name), {}),
                         "foreign_keys": _safe(lambda: inspector.get_foreign_keys(table_name, schema=schema_name), []),
-                        "indexes": _safe(lambda: inspector.get_indexes(table_name, schema=schema_name), []) if "INDEX" in items else [],
+                        "indexes": _normalize_indexes(_safe(lambda: inspector.get_indexes(table_name, schema=schema_name), [])) if "INDEX" in items else [],
                         "unique_constraints": _safe(lambda: inspector.get_unique_constraints(table_name, schema=schema_name), []),
                         "permissions": permissions.get(table_name, permissions.get("*", {"select": None, "privileges": [], "checked_as": "not_collected"})),
                     }

@@ -7,7 +7,7 @@ import secrets
 import hashlib
 from urllib.parse import quote
 from typing import Any
-
+from types import SimpleNamespace
 import yaml
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,15 +24,19 @@ from .integration import ensure_integration_views, snapshot_diff, snapshot_summa
 from .datalake import datalake_root
 from .datalake_query import DatalakeTableNotFound, list_l0_tables, preview_l0_table
 from .load_service import run_full_load
-from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaColumnExt, MetaLayoutChange, MetaLayoutChangeAction, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
-from .ai_description import suggest_descriptions, suggest_table_description
+from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaColumnExt, MetaLayoutChange, MetaLayoutChangeAction, MetaPkCandidate, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
+from .ai_description import recommend_date_columns, suggest_descriptions, suggest_table_description
+from .manual_ai import build_manual_prompt, validate_manual_response
 from .capabilities import assert_supported_db_type
 from .collector import available_schema_names, normalize_collection_items, source_engine, test_source
 from .catalog.collection_permissions import check_collection_catalog_permissions
 from .scheduler import enqueue_run, request_run_cancel, start_scheduler, stop_scheduler, sync_jobs
-from .schemas import DataSourceIn, DataSourceOut, DescriptionPreviewIn, FullLoadIn, JobIn, JobOut, LoginRequest, LoginResponse, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut
+from .schemas import DataSourceIn, DataSourceOut, DateColumnRecommendationIn, DescriptionPreviewIn, FullLoadIn, JobIn, JobOut, LoginRequest, LoginResponse, ManualAiApplyIn, ManualAiPromptIn, ManualAiResponseIn, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut, PkCandidatesGenerateIn, PkCandidatesListResponse, PkCandidatesGenerateResponse, PkCandidateApplyIn, PkCandidateApplyResponse, PkCandidateValidateResponse, PkCandidateRejectIn, RegisteredTableIdentity
 from .security import create_token, decode_token, decrypt_json, encrypt_json, hash_password, verify_password
 from .seed import seed
+from . import pk_candidate_service
+from .pk_recommendation import recommend_pk_candidates
+from .pk_validation import validate_source_data
 
 
 def user_out(user: User) -> UserOut:
@@ -929,10 +933,12 @@ def delete_job(job_id: int, session: Session = Depends(get_session), _: User = D
 
 
 @app.get("/api/runs", response_model=list[RunOut])
-def list_runs(job_id: int | None = Query(default=None, ge=1), session: Session = Depends(get_session), _: User = Depends(require("jobs:read"))):
+def list_runs(job_id: int | None = Query(default=None, ge=1), status: str | None = Query(default=None, min_length=1, max_length=30), session: Session = Depends(get_session), _: User = Depends(require("jobs:read"))):
     query = select(CollectionRun).order_by(desc(CollectionRun.started_at)).limit(100)
     if job_id is not None:
         query = query.where(CollectionRun.job_id == job_id)
+    if status is not None:
+        query = query.where(CollectionRun.status == status)
     return session.scalars(query).all()
 
 
@@ -993,6 +999,7 @@ def _meta_table_script(config: MetaTableConfig, db_type: str) -> str:
     q = quote_ident
     layout_changes_name = f"{schema}.{q('TB_META_LAYOUT_CHANGES_EXT')}"
     layout_actions_name = f"{schema}.{q('TB_META_LAYOUT_CHANGE_ACTIONS_EXT')}"
+    pk_candidates_name = f"{schema}.{q('TB_META_PK_CANDIDATES_EXT')}"
     identity = "INT IDENTITY(1,1)" if db_type == "mssql" else "SERIAL"
     lines = [
         f"CREATE SCHEMA IF NOT EXISTS {schema};", "",
@@ -1077,6 +1084,42 @@ def _meta_table_script(config: MetaTableConfig, db_type: str) -> str:
         ");",
         f"CREATE INDEX {q(config.columns_table_name + '_system_cd_idx')} ON {column_name}{index_tail} ({q('system_cd')}, {q('instance_name')}, {q('owner')}, {q('table_name')});",
         "",
+        f"CREATE TABLE {pk_candidates_name} (",
+        f"        {q('CANDIDATE_ID')} {identity} NOT NULL,",
+        f"        {q('SYSTEM_CD')} {varchar(32)} NOT NULL,",
+        f"        {q('INSTANCE_NAME')} {varchar(255)} NOT NULL,",
+        f"        {q('POSTFIX')} {varchar(32)} NOT NULL,",
+        f"        {q('OWNER')} {varchar(255)} NOT NULL,",
+        f"        {q('TABLE_NAME')} {varchar(255)} NOT NULL,",
+        f"        {q('OBJECT_TYPE')} {varchar(20)} NOT NULL,",
+        f"        {q('SRC_DATA_SOURCE_ID')} INTEGER NULL,",
+        f"        {q('SRC_SNAPSHOT_ID')} INTEGER NULL,",
+        f"        {q('CANDIDATE_RANK')} INTEGER NOT NULL,",
+        f"        {q('CANDIDATE_COLUMNS_JSON')} TEXT NOT NULL,",
+        f"        {q('CANDIDATE_FINGERPRINT')} {varchar(64)} NOT NULL UNIQUE,",
+        f"        {q('SOURCE_TYPE')} {varchar(40)} NOT NULL,",
+        f"        {q('METHOD')} {varchar(40)} NOT NULL,",
+        f"        {q('MODEL_NAME')} {varchar(120)} NULL,",
+        f"        {q('CONFIDENCE')} NUMERIC(5,4) NOT NULL,",
+        f"        {q('REASON')} TEXT NULL,",
+        f"        {q('STATUS')} {varchar(30)} NOT NULL,",
+        f"        {q('VALIDATION_STATUS')} {varchar(30)} NOT NULL,",
+        f"        {q('ROW_COUNT')} BIGINT NULL,",
+        f"        {q('NULL_COUNT')} BIGINT NULL,",
+        f"        {q('DUPLICATE_GROUP_COUNT')} BIGINT NULL,",
+        f"        {q('VALIDATED_AT')} timestamp NULL,",
+        f"        {q('VALIDATION_MESSAGE')} TEXT NULL,",
+        f"        {q('CREATED_BY')} {varchar(255)} NULL,",
+        f"        {q('CREATED_AT')} timestamp NOT NULL,",
+        f"        {q('REVIEWED_BY')} {varchar(255)} NULL,",
+        f"        {q('REVIEWED_AT')} timestamp NULL,",
+        f"        {q('APPLIED_BY')} {varchar(255)} NULL,",
+        f"        {q('APPLIED_AT')} timestamp NULL,",
+        f"        PRIMARY KEY ({q('CANDIDATE_ID')})",
+        ");",
+        f"CREATE INDEX {q('TB_META_PK_CANDIDATES_EXT_LOOKUP_IDX')} ON {pk_candidates_name}{index_tail} ({q('SYSTEM_CD')}, {q('INSTANCE_NAME')}, {q('POSTFIX')}, {q('OWNER')}, {q('TABLE_NAME')}, {q('STATUS')});",
+        f"CREATE INDEX {q('TB_META_PK_CANDIDATES_EXT_SNAPSHOT_IDX')} ON {pk_candidates_name}{index_tail} ({q('SRC_SNAPSHOT_ID')});",
+        "",
         f"CREATE TABLE {layout_changes_name} (",
         f"        {q('CHANGE_ID')} {identity} NOT NULL,",
         f"        {q('SYSTEM_CD')} {varchar(32)} NULL,",
@@ -1153,7 +1196,7 @@ def _identifier_name(value: str) -> str:
 def _metadata_expected_structure(config: MetaTableConfig, db_type: str) -> dict[str, dict[str, Any]]:
     script = _meta_table_script(config, db_type)
     expected: dict[str, dict[str, Any]] = {}
-    table_names = [config.tables_table_name, config.columns_table_name, "TB_META_LAYOUT_CHANGES_EXT", "TB_META_LAYOUT_CHANGE_ACTIONS_EXT"]
+    table_names = [config.tables_table_name, config.columns_table_name, "TB_META_PK_CANDIDATES_EXT", "TB_META_LAYOUT_CHANGES_EXT", "TB_META_LAYOUT_CHANGE_ACTIONS_EXT"]
     for block in re.finditer(r"CREATE TABLE\s+(.+?)\s*\((.*?)\);", script, re.IGNORECASE | re.DOTALL):
         table_expression, body = block.groups()
         table_name = _identifier_name(table_expression.split(".")[-1])
@@ -1214,6 +1257,7 @@ def execute_metadata_register_script(payload: dict[str, bool] | None = None, ses
     table_names = [
         config.tables_table_name,
         config.columns_table_name,
+        "TB_META_PK_CANDIDATES_EXT",
         "TB_META_LAYOUT_CHANGES_EXT",
         "TB_META_LAYOUT_CHANGE_ACTIONS_EXT",
     ]
@@ -1441,6 +1485,12 @@ def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapsho
                 pk_names = set((table.get("primary_key") or {}).get("constrained_columns") or [])
                 selected_column_names = set(payload.columns_by_table.get(table_name, [])) if payload.columns_by_table is not None else {str(column.get("name", "")) for column in table.get("columns", [])}
                 flag_candidates = _date_flag_candidates([column for column in table.get("columns", []) if str(column.get("name", "")) in selected_column_names])
+                requested_flags = (payload.date_recommendations or {}).get(table_name) or {}
+                requested_partition = [name for name in requested_flags.get("partition_columns", []) if name in flag_candidates["partition_key_yn"]][:1]
+                requested_update = [name for name in requested_flags.get("update_base_columns", []) if name in flag_candidates["update_base_yn"]]
+                if requested_flags:
+                    for name in flag_candidates["partition_key_yn"]: flag_candidates["partition_key_yn"][name] = "Y" if name in requested_partition else "N"
+                    for name in flag_candidates["update_base_yn"]: flag_candidates["update_base_yn"][name] = "Y" if name in requested_update else "N"
                 for position, column in enumerate(table.get("columns", []), start=1):
                     column_name = str(column.get("name", ""))
                     if not column_name or (payload.columns_by_table is not None and column_name not in set(payload.columns_by_table.get(table_name, []))):
@@ -1613,16 +1663,178 @@ def registered_metadata(
     return {"items": items, "total": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size, "sources": sources, "source_counts": source_counts}
 
 
+@app.post("/api/metadata/registered/manual-ai/prompt")
+def create_manual_ai_prompt(payload: ManualAiPromptIn, session: Session = Depends(get_session), _: User = Depends(require("metadata:write"))):
+    config = session.get(MetaTableConfig, 1)
+    if not config or not config.description_ai_enabled or config.description_ai_provider != "manual":
+        raise HTTPException(409, "시스템 관리에서 '프롬프트 복사·응답 가져오기' 방식을 먼저 선택하세요.")
+    return build_manual_prompt(payload.model_dump(), get_settings().secret_key)
+
+
+@app.post("/api/metadata/registered/manual-ai/validate")
+def validate_manual_ai_import(payload: ManualAiResponseIn, session: Session = Depends(get_session), _: User = Depends(require("metadata:write"))):
+    config = session.get(MetaTableConfig, 1)
+    if not config or not config.description_ai_enabled or config.description_ai_provider != "manual":
+        raise HTTPException(409, "시스템 관리에서 '프롬프트 복사·응답 가져오기' 방식을 먼저 선택하세요.")
+    metadata = payload.model_dump(exclude={"response_text"})
+    try:
+        return validate_manual_response(payload.response_text, metadata, get_settings().secret_key)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+
+
+@app.post("/api/metadata/registered/manual-ai/apply-pk")
+def apply_manual_ai_pk_candidates(payload: ManualAiApplyIn, session: Session = Depends(get_session), user: User = Depends(require("metadata:write"))):
+    config = session.get(MetaTableConfig, 1)
+    if not config or not config.description_ai_enabled or config.description_ai_provider != "manual":
+        raise HTTPException(409, "수동 AI 추천 방식이 활성화되어 있지 않습니다.")
+    metadata = payload.model_dump(exclude={"response_text", "selected_pk_indexes"})
+    try:
+        validated = validate_manual_response(payload.response_text, metadata, get_settings().secret_key)
+        available = validated["recommendations"]["pk_candidates"]
+        indexes = payload.selected_pk_indexes
+        if len(indexes) != len(set(indexes)) or any(index < 0 or index >= len(available) for index in indexes):
+            raise ValueError("선택한 PK 후보가 현재 검증 결과와 일치하지 않습니다.")
+        selected = []
+        for index in indexes:
+            item = available[index]
+            selected.append({**item, "source_type": "MANUAL_AI", "method": "manual-import", "model_name": None})
+        if not selected:
+            return {"source_pk_applied": False, "candidates": [], "message": "선택한 PK 후보가 없습니다."}
+        return pk_candidate_service.generate(
+            session,
+            payload,
+            user.email or user.name,
+            lambda *_: {"candidates": selected, "source_type": "MANUAL_AI", "method": "manual-import", "fallback_used": False},
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(502, "PK 후보 등록에 실패했습니다.") from exc
+
+
 @app.post("/api/metadata/registered/descriptions/preview")
 def preview_registered_descriptions(payload: DescriptionPreviewIn, session: Session = Depends(get_session), _: User = Depends(require("metadata:write"))):
     config = session.get(MetaTableConfig, 1)
     if not config or not config.description_ai_enabled:
         raise HTTPException(409, "시스템 관리에서 설명 자동생성을 먼저 활성화하세요.")
-    items = suggest_descriptions([column.model_dump() for column in payload.columns], config.description_ai_provider, config.description_ai_model)
+    if config.description_ai_provider == "manual":
+        raise HTTPException(409, "수동 AI 방식에서는 프롬프트 생성과 응답 가져오기를 사용하세요.")
+    items = suggest_descriptions(
+        [column.model_dump() for column in payload.columns],
+        config.description_ai_provider,
+        config.description_ai_model,
+        payload.table.table_name if payload.table else "",
+        [column.model_dump() for column in payload.table.columns] if payload.table else [column.model_dump() for column in payload.columns],
+    )
     table = None
     if payload.table and not str(payload.table.comments or "").strip():
         table = suggest_table_description(payload.table.table_name, [column.model_dump() for column in payload.table.columns], config.description_ai_provider, config.description_ai_model)
     return {"items": items, "table": table, "provider": config.description_ai_provider, "model": config.description_ai_model}
+
+
+@app.post("/api/metadata/registered/pk-candidates/generate", response_model=PkCandidatesGenerateResponse)
+def generate_registered_pk_candidates(payload: PkCandidatesGenerateIn, session: Session = Depends(get_session), user: User = Depends(require("metadata:write"))):
+    try:
+        return pk_candidate_service.generate(session, payload, user.email or user.name, recommend_pk_candidates)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(502, "PK 후보 생성에 실패했습니다.") from exc
+
+
+@app.get("/api/metadata/registered/pk-candidates", response_model=PkCandidatesListResponse)
+def list_registered_pk_candidates(identity: RegisteredTableIdentity = Depends(), session: Session = Depends(get_session), _: User = Depends(require("metadata:read"))):
+    try:
+        return pk_candidate_service.list_candidates(session, identity)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(502, "PK 후보 조회에 실패했습니다.") from exc
+
+
+@app.post("/api/metadata/registered/pk-candidates/{candidate_id}/validate", response_model=PkCandidateValidateResponse)
+def validate_registered_pk_candidate(candidate_id: int, session: Session = Depends(get_session), _: User = Depends(require("metadata:write"))):
+    candidate = session.get(MetaPkCandidate, candidate_id)
+    external = None
+    if not candidate:
+        external = pk_candidate_service._external_candidate(session, candidate_id)
+        if external and external[2]:
+            candidate = dict(external[2])
+    if not candidate:
+        raise HTTPException(404, "PK 후보를 찾을 수 없습니다.")
+    value = lambda key: candidate.get(key) if isinstance(candidate, dict) else getattr(candidate, key)
+    identity = {key: value(key) for key in pk_candidate_service.KEYS}
+    try:
+        config, registered, obj, _, source = pk_candidate_service.resolve_registered(session, identity)
+        source = source or session.get(DataSource, getattr(registered, "src_data_source_id", None))
+        snapshot = session.get(SchemaSnapshot, value("src_snapshot_id"))
+        if not source or not snapshot:
+            result = {"validation_status": "UNAVAILABLE", "message": "원천 데이터에 접근할 수 없어 검증할 수 없습니다."}
+        else:
+            result = validate_source_data(source, snapshot.payload, value("table_name"), pk_candidate_service.parse_candidate_columns(value("candidate_columns_json"))).as_dict()
+        now = datetime.now(timezone.utc)
+        if isinstance(candidate, dict):
+            with pk_candidate_service._source_transaction(external[1]) as connection:
+                _, _, candidate_table = pk_candidate_service._external_tables(external[1], external[0], connection)
+                cols = {str(column.name).lower(): column for column in candidate_table.c}
+                connection.execute(candidate_table.update().where(cols["candidate_id"] == candidate_id).values({
+                    cols["validation_status"]: result["validation_status"],
+                    cols["status"]: "VALIDATED" if result["validation_status"] == "PASSED" else "GENERATED",
+                    cols["row_count"]: result.get("row_count"), cols["null_count"]: result.get("null_count"),
+                    cols["duplicate_group_count"]: result.get("duplicate_group_count"),
+                    cols["validation_message"]: result.get("message", ""), cols["validated_at"]: now,
+                }))
+        else:
+            candidate.validation_status = result["validation_status"]
+            candidate.status = "VALIDATED" if result["validation_status"] == "PASSED" else "GENERATED"
+            candidate.row_count = result.get("row_count")
+            candidate.null_count = result.get("null_count")
+            candidate.duplicate_group_count = result.get("duplicate_group_count")
+            candidate.validation_message = result.get("message", "")
+            candidate.validated_at = now
+            session.commit()
+        return {"candidate_id": candidate_id, **result}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(502, "PK 후보 검증에 실패했습니다.") from exc
+
+
+@app.post("/api/metadata/registered/pk-candidates/{candidate_id}/apply", response_model=PkCandidateApplyResponse)
+def apply_registered_pk_candidate(candidate_id: int, payload: PkCandidateApplyIn, session: Session = Depends(get_session), user: User = Depends(require("metadata:write"))):
+    try:
+        result = pk_candidate_service.apply(session, candidate_id, payload.confirm, user.email or user.name)
+        return {"candidate_id": result["candidate_id"], "columns": result["applied_columns"], "status": result["status"]}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(409, "PK 후보를 적용할 수 없습니다.") from exc
+
+
+@app.post("/api/metadata/registered/pk-candidates/{candidate_id}/reject")
+def reject_registered_pk_candidate(candidate_id: int, payload: PkCandidateRejectIn, session: Session = Depends(get_session), user: User = Depends(require("metadata:write"))):
+    try:
+        return pk_candidate_service.reject(session, candidate_id, payload.reason, user.email or user.name)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(409, "PK 후보를 반려할 수 없습니다.") from exc
+
+
+@app.post("/api/metadata/registered/date-column-recommendations")
+def recommend_registered_date_columns(payload: DateColumnRecommendationIn, session: Session = Depends(get_session), _: User = Depends(require("metadata:write"))):
+    config = session.get(MetaTableConfig, 1)
+    provider = config.description_ai_provider if config and config.description_ai_enabled else "rules"
+    model = config.description_ai_model if config else "qwen3:latest"
+    return recommend_date_columns(payload.table_name, [column.model_dump() for column in payload.columns], provider, model)
 
 
 @app.delete("/api/metadata/registered")

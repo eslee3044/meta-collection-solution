@@ -166,6 +166,12 @@ class DescriptionColumnIn(BaseModel):
     data_type: str = Field(default="", max_length=120)
     comments: str | None = Field(default=None, max_length=2000)
     description: str | None = Field(default=None, max_length=2000)
+    nullable: bool | None = None
+    null_yn: str | None = Field(default=None, max_length=1)
+    pk_yn: str | None = Field(default=None, max_length=1)
+    index_yn: str | None = Field(default=None, max_length=1)
+    index_names: list[str] = Field(default_factory=list, max_length=30)
+    ordinal_position: int | None = None
 
 
 class DescriptionTableIn(BaseModel):
@@ -180,6 +186,33 @@ class DescriptionPreviewIn(BaseModel):
     columns: list[DescriptionColumnIn] = Field(default_factory=list, max_length=500)
 
 
+class DateColumnRecommendationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    table_name: str = Field(default="", max_length=255)
+    columns: list[DescriptionColumnIn] = Field(default_factory=list, max_length=500)
+
+
+class ManualAiPromptIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    system_cd: str = Field(default="", max_length=32)
+    instance_name: str = Field(default="", max_length=255)
+    postfix: str = Field(default="", max_length=32)
+    owner: str = Field(default="", max_length=255)
+    table_name: str = Field(min_length=1, max_length=255)
+    object_type: Literal["TABLE", "VIEW"] = "TABLE"
+    snapshot_id: int | None = None
+    comments: str | None = Field(default=None, max_length=4000)
+    columns: list[DescriptionColumnIn] = Field(default_factory=list, min_length=1, max_length=500)
+
+
+class ManualAiResponseIn(ManualAiPromptIn):
+    response_text: str = Field(min_length=1, max_length=204_800)
+
+
+class ManualAiApplyIn(ManualAiResponseIn):
+    selected_pk_indexes: list[int] = Field(default_factory=list, max_length=4)
+
+
 class MetaTableConfigIn(BaseModel):
     source_type: Literal["internal", "external"] = "internal"
     external_source_id: int | None = None
@@ -188,7 +221,7 @@ class MetaTableConfigIn(BaseModel):
     columns_table_name: str = Field(default="TB_META_COLUMNS_EXT", min_length=1, max_length=255)
     target_database_name: str = Field(default="BigQuery", min_length=1, max_length=255)
     description_ai_enabled: bool = False
-    description_ai_provider: Literal["rules", "ollama"] = "rules"
+    description_ai_provider: Literal["rules", "ollama", "manual"] = "rules"
     description_ai_model: str = Field(default="qwen3:latest", min_length=1, max_length=120)
 
 
@@ -210,6 +243,7 @@ class MetaRegisterIn(BaseModel):
     instance_div_cd: str = Field(default="", max_length=32)
     target_name_suffix: str = Field(default="", max_length=32)
     columns_by_table: dict[str, list[str]] | None = None
+    date_recommendations: dict[str, dict[str, list[str]]] | None = None
     table_comments: dict[str, str] | None = None
 
 
@@ -220,3 +254,82 @@ class MenuIn(BaseModel):
     icon: str = "Circle"
     order: int = 0
     parent_id: int | None = None
+
+
+class StrictSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class RegisteredTableIdentity(StrictSchema):
+    system_cd: str = Field(min_length=1, max_length=32)
+    instance_name: str = Field(min_length=1, max_length=255)
+    postfix: str = Field(default="", max_length=32)
+    owner: str = Field(min_length=1, max_length=255)
+    table_name: str = Field(min_length=1, max_length=255)
+
+
+class PkCandidate(StrictSchema):
+    candidate_id: int | None = None
+    rank: int = Field(ge=1, le=4)
+    columns: list[str] = Field(min_length=1, max_length=6)
+    source_type: str
+    method: str
+    confidence: float = Field(ge=0, le=1)
+    reason: str = ""
+    status: str = "GENERATED"
+    validation_status: str = "PENDING"
+    model_name: str | None = None
+    row_count: int | None = Field(default=None, ge=0)
+    null_count: int | None = Field(default=None, ge=0)
+    duplicate_group_count: int | None = Field(default=None, ge=0)
+    validation_message: str | None = None
+    src_snapshot_id: int | None = None
+
+
+class PkCandidatesGenerateIn(RegisteredTableIdentity):
+    pass
+
+
+class PkCandidatesGenerateResponse(StrictSchema):
+    source_pk_applied: bool
+    source_pk_columns: list[str] = Field(default_factory=list, max_length=6)
+    candidates: list[PkCandidate] = Field(default_factory=list, max_length=4)
+    fallback_used: bool = False
+    message: str = ""
+
+
+class PkCandidatesListResponse(StrictSchema):
+    current_pk_columns: list[str] = Field(default_factory=list, max_length=6)
+    current_pk_source: Literal["SOURCE_PK", "LOGICAL_PK", "NONE"]
+    source_pk_columns: list[str] = Field(default_factory=list, max_length=6)
+    items: list[PkCandidate] = Field(default_factory=list, max_length=4)
+    can_generate: bool = True
+
+
+class PkCandidateValidateResponse(StrictSchema):
+    candidate_id: int
+    validation_status: Literal["PENDING", "PASSED", "FAILED", "EMPTY_SOURCE", "UNAVAILABLE", "NOT_REQUIRED"]
+    row_count: int | None = Field(default=None, ge=0)
+    null_count: int | None = Field(default=None, ge=0)
+    duplicate_group_count: int | None = Field(default=None, ge=0)
+    message: str = ""
+
+
+class PkCandidateApplyIn(StrictSchema):
+    confirm: bool
+
+
+class PkCandidateApplyResponse(StrictSchema):
+    candidate_id: int
+    columns: list[str] = Field(min_length=1, max_length=6)
+    status: str
+
+
+class PkCandidateRejectIn(StrictSchema):
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class PkCandidateRejectResponse(StrictSchema):
+    candidate_id: int
+    status: str
+    reason: str

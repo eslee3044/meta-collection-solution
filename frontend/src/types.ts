@@ -8,3 +8,9 @@ export type Permission = { id: number; code: string; description: string }
 export type Menu = { id: number; code: string; label: string; path: string; icon: string; order: number }
 export type Capabilities = { deployment_mode: string; supported_db_types: string[]; excluded_db_types: string[] }
 export type WorkerStatus = { queued: number; running: number; retry_wait: number; failed: number; timeout: number; stalled: number; stale_minutes: number; poll_seconds: number }
+
+export type RegisteredTableIdentity = { system_cd: string; instance_name: string; postfix: string; owner: string; table_name: string }
+export type PkCandidate = { candidate_id: number | null; rank: number; columns: string[]; source_type: string; method: string; confidence: number; reason: string; status: string; validation_status: 'PENDING' | 'PASSED' | 'FAILED' | 'EMPTY_SOURCE' | 'UNAVAILABLE' | 'NOT_REQUIRED'; row_count?: number | null; null_count?: number | null; duplicate_group_count?: number | null; validation_message?: string }
+export type PkCandidatesResponse = { source_pk_applied: boolean; source_pk_columns: string[]; candidates: PkCandidate[]; fallback_used: boolean; message: string }
+export type PkCandidatesListResponse = { current_pk_columns: string[]; current_pk_source: 'SOURCE_PK' | 'LOGICAL_PK' | 'NONE'; source_pk_columns: string[]; items: PkCandidate[]; can_generate: boolean }
+export type PkValidationResponse = { candidate_id: number; validation_status: PkCandidate['validation_status']; row_count?: number | null; null_count?: number | null; duplicate_group_count?: number | null; message: string }

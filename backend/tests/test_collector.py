@@ -103,6 +103,7 @@ def test_sqlite_schema_collection(tmp_path: Path):
     assert set(tables) == {"teams", "members"}
     assert any(fk["referred_table"] == "teams" for fk in tables["members"]["foreign_keys"])
     assert any(index["name"] == "ix_members_email" for index in tables["members"]["indexes"])
+    assert any(index.get("columns") == ["email"] for index in tables["members"]["indexes"])
     assert any(view["name"] == "member_view" and view["permissions"]["select"] is True for schema in payload["schemas"] for view in schema["views"])
     assert payload["schemas"][0]["procedures"] == []
 

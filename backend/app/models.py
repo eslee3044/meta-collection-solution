@@ -1,9 +1,8 @@
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, JSON, String, Table, Text
+from sqlalchemy import Boolean, BigInteger, Column, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Table, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-
 from .database import Base
 
 
@@ -243,6 +242,46 @@ class MetaColumnExt(Base):
     createdby: Mapped[str | None] = mapped_column(String(255), nullable=True)
     lastupdated: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updatedby: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class MetaPkCandidate(Base):
+    __tablename__ = "TB_META_PK_CANDIDATES_EXT"
+    __table_args__ = (
+        Index("TB_META_PK_CANDIDATES_EXT_LOOKUP_IDX", "SYSTEM_CD", "INSTANCE_NAME", "POSTFIX", "OWNER", "TABLE_NAME", "STATUS"),
+        Index("TB_META_PK_CANDIDATES_EXT_SNAPSHOT_IDX", "SRC_SNAPSHOT_ID"),
+        {"schema": "EAPET", "quote": True},
+    )
+
+    candidate_id: Mapped[int] = mapped_column("CANDIDATE_ID", primary_key=True)
+    system_cd: Mapped[str] = mapped_column("SYSTEM_CD", String(32), nullable=False)
+    instance_name: Mapped[str] = mapped_column("INSTANCE_NAME", String(255), nullable=False)
+    postfix: Mapped[str] = mapped_column("POSTFIX", String(32), nullable=False)
+    owner: Mapped[str] = mapped_column("OWNER", String(255), nullable=False)
+    table_name: Mapped[str] = mapped_column("TABLE_NAME", String(255), nullable=False)
+    object_type: Mapped[str] = mapped_column("OBJECT_TYPE", String(20), nullable=False)
+    src_data_source_id: Mapped[int | None] = mapped_column("SRC_DATA_SOURCE_ID", Integer, nullable=True)
+    src_snapshot_id: Mapped[int | None] = mapped_column("SRC_SNAPSHOT_ID", Integer, nullable=True)
+    candidate_rank: Mapped[int] = mapped_column("CANDIDATE_RANK", Integer, nullable=False)
+    candidate_columns_json: Mapped[str] = mapped_column("CANDIDATE_COLUMNS_JSON", Text, nullable=False)
+    candidate_fingerprint: Mapped[str] = mapped_column("CANDIDATE_FINGERPRINT", String(64), nullable=False, unique=True)
+    source_type: Mapped[str] = mapped_column("SOURCE_TYPE", String(40), nullable=False)
+    method: Mapped[str] = mapped_column("METHOD", String(40), nullable=False)
+    model_name: Mapped[str | None] = mapped_column("MODEL_NAME", String(120), nullable=True)
+    confidence: Mapped[float] = mapped_column("CONFIDENCE", Numeric(5, 4), nullable=False)
+    reason: Mapped[str | None] = mapped_column("REASON", Text, nullable=True)
+    status: Mapped[str] = mapped_column("STATUS", String(30), nullable=False)
+    validation_status: Mapped[str] = mapped_column("VALIDATION_STATUS", String(30), nullable=False)
+    row_count: Mapped[int | None] = mapped_column("ROW_COUNT", BigInteger, nullable=True)
+    null_count: Mapped[int | None] = mapped_column("NULL_COUNT", BigInteger, nullable=True)
+    duplicate_group_count: Mapped[int | None] = mapped_column("DUPLICATE_GROUP_COUNT", BigInteger, nullable=True)
+    validated_at: Mapped[datetime | None] = mapped_column("VALIDATED_AT", DateTime(timezone=True), nullable=True)
+    validation_message: Mapped[str | None] = mapped_column("VALIDATION_MESSAGE", Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column("CREATED_BY", String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column("CREATED_AT", DateTime(timezone=True), default=utcnow, nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column("REVIEWED_BY", String(255), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column("REVIEWED_AT", DateTime(timezone=True), nullable=True)
+    applied_by: Mapped[str | None] = mapped_column("APPLIED_BY", String(255), nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column("APPLIED_AT", DateTime(timezone=True), nullable=True)
 
 
 class MetaLayoutChange(Base):
