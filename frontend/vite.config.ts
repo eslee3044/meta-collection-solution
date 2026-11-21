@@ -5,7 +5,6 @@ const apiProxy = { '/api': 'http://localhost:8000' }
 
 export default defineConfig({
   plugins: [react()],
-  build: { emptyOutDir: false },
   server: {
     port: 5173,
     proxy: apiProxy,

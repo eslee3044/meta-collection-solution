@@ -61,6 +61,18 @@ def test_catalog_registry_keeps_inspector_fallback_and_oracle_provider():
     assert oracle.custom.__class__ is OracleCatalogProvider
 
 
+def test_oracle_provider_filters_system_schemas():
+    provider = OracleCatalogProvider(oracle_source())
+    connection = FakeConnection({"FROM dba_users": [
+        {"name": "SYS"},
+        {"name": "DBSNMP"},
+        {"name": "METAVAULT_ORA_TEST"},
+    ]})
+
+    assert provider.schema_names(connection) == ["METAVAULT_ORA_TEST"]
+    assert "oracle_maintained" in provider.schema_query().lower()
+
+
 def test_oracle_provider_collects_catalog_layers():
     provider = OracleCatalogProvider(oracle_source())
     connection = FakeConnection(

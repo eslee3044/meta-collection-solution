@@ -106,16 +106,31 @@ def _ollama_suggestions(targets: list[dict], table_name: str, table_columns: lis
     parsed_url = urlsplit(base_url)
     if parsed_url.scheme not in {"http", "https"} or parsed_url.hostname not in _ALLOWED_LOCAL_HOSTS:
         raise ValueError("로컬 AI URL은 localhost, host.docker.internal 또는 loopback 주소만 사용할 수 있습니다.")
+    target_names = [str(target.get("column_name", "")).strip() for target in targets if str(target.get("column_name", "")).strip()]
+    response_schema = {
+        "type": "object",
+        "properties": {
+            name: {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 4,
+            }
+            for name in target_names
+        },
+        "required": target_names,
+        "additionalProperties": False,
+    }
     prompt = (
         "한국어 데이터 사전 설명 후보를 생성하세요. 설명이 비어 있는 대상 컬럼만 처리합니다. "
         "테이블명과 전체 컬럼 구조를 반드시 참고하고, 대상 컬럼과 다른 컬럼의 관계를 고려하세요. "
         "PK·인덱스·NULL 여부와 컬럼명 조합으로 업무적 의미를 추론하세요. 각 대상 컬럼마다 서로 다른 짧은 설명을 최대 4개 생성하세요. "
-        "JSON 객체로만 반환하세요. 키는 column_name, 값은 설명 문자열 배열입니다.\n"
+        "제공된 JSON Schema를 정확히 따르고 모든 대상 컬럼을 반드시 반환하세요.\n"
         + json.dumps({"table_name": table_name, "table_columns": table_columns[:100], "targets": targets}, ensure_ascii=False)
     )
     request = Request(
         f"{base_url.rstrip('/')}/api/generate",
-        data=json.dumps({"model": model, "prompt": prompt, "stream": False, "format": "json", "options": {"temperature": 0}}).encode(),
+        data=json.dumps({"model": model, "prompt": prompt, "stream": False, "format": response_schema, "options": {"temperature": 0}}).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
     )

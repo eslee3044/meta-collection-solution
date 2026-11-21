@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import hashlib
+import logging
 from urllib.parse import quote
 from typing import Any
 from types import SimpleNamespace
@@ -22,21 +23,28 @@ from .dependencies import current_user, require
 from .excel_export import build_schema_workbook, build_sources_workbook
 from .integration import ensure_integration_views, snapshot_diff, snapshot_summary
 from .datalake import datalake_root
+from .datalake_ddl import build_table_spec, render_postgresql_ddl, render_postgresql_procedure_scripts
 from .datalake_query import DatalakeTableNotFound, list_l0_tables, preview_l0_table
+from .datalake_postgres import apply_postgresql_ddl, explain_postgresql_error, inspect_postgresql_objects
 from .load_service import run_full_load
-from .models import CollectionJob, CollectionRun, DataSource, Menu, MetaColumnExt, MetaLayoutChange, MetaLayoutChangeAction, MetaPkCandidate, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
+from .models import CollectionJob, CollectionRun, DataSource, DatalakeTarget, Menu, MetaColumnExt, MetaLayoutChange, MetaLayoutChangeAction, MetaPkCandidate, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
 from .ai_description import recommend_date_columns, suggest_descriptions, suggest_table_description
 from .manual_ai import build_manual_prompt, validate_manual_response
 from .capabilities import assert_supported_db_type
 from .collector import available_schema_names, normalize_collection_items, source_engine, test_source
 from .catalog.collection_permissions import check_collection_catalog_permissions
+from .catalog.oracle import OracleCatalogProvider
 from .scheduler import enqueue_run, request_run_cancel, start_scheduler, stop_scheduler, sync_jobs
-from .schemas import DataSourceIn, DataSourceOut, DateColumnRecommendationIn, DescriptionPreviewIn, FullLoadIn, JobIn, JobOut, LoginRequest, LoginResponse, ManualAiApplyIn, ManualAiPromptIn, ManualAiResponseIn, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut, PkCandidatesGenerateIn, PkCandidatesListResponse, PkCandidatesGenerateResponse, PkCandidateApplyIn, PkCandidateApplyResponse, PkCandidateValidateResponse, PkCandidateRejectIn, RegisteredTableIdentity
+from .schemas import DataSourceIn, DataSourceOut, DatalakeTargetConnectionIn, DatalakeTargetOut, DatalakeTargetReplaceIn, DateColumnRecommendationIn, DescriptionPreviewIn, FullLoadIn, JobIn, JobOut, LoginRequest, LoginResponse, ManualAiApplyIn, ManualAiPromptIn, ManualAiResponseIn, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut, PkCandidatesGenerateIn, PkCandidatesListResponse, PkCandidatesGenerateResponse, PkCandidateApplyIn, PkCandidateApplyResponse, PkCandidateValidateResponse, PkCandidateRejectIn, RegisteredTableIdentity, RegisteredProcedureApplyIn
 from .security import create_token, decode_token, decrypt_json, encrypt_json, hash_password, verify_password
+from .datalake_target_service import create_target, load_active_connection, replace_target, retest_target, sync_meta_target_database_from_active_target, target_status, test_target_connection
 from .seed import seed
 from . import pk_candidate_service
 from .pk_recommendation import recommend_pk_candidates
 from .pk_validation import validate_source_data
+
+
+logger = logging.getLogger(__name__)
 
 
 def user_out(user: User) -> UserOut:
@@ -95,7 +103,8 @@ async def lifespan(_: FastAPI):
             }
             for column_name, definition in table_tracking_columns.items():
                 connection.execute(text(f'ALTER TABLE "EAPET"."TB_META_TABLES_EXT" ADD COLUMN IF NOT EXISTS "{column_name}" {definition}'))
-            connection.execute(text("ALTER TABLE meta_table_config ADD COLUMN IF NOT EXISTS target_database_name VARCHAR(255) NOT NULL DEFAULT 'BigQuery'"))
+            connection.execute(text("ALTER TABLE meta_table_config ADD COLUMN IF NOT EXISTS target_database_name VARCHAR(255) NOT NULL DEFAULT 'PostgreSQL'"))
+            connection.execute(text("ALTER TABLE meta_table_config ALTER COLUMN target_database_name SET DEFAULT 'PostgreSQL'"))
             connection.execute(text("ALTER TABLE meta_table_config ADD COLUMN IF NOT EXISTS description_ai_enabled BOOLEAN NOT NULL DEFAULT FALSE"))
             connection.execute(text("ALTER TABLE meta_table_config ADD COLUMN IF NOT EXISTS description_ai_provider VARCHAR(30) NOT NULL DEFAULT 'rules'"))
             connection.execute(text("ALTER TABLE meta_table_config ADD COLUMN IF NOT EXISTS description_ai_model VARCHAR(120) NOT NULL DEFAULT 'qwen3:latest'"))
@@ -104,7 +113,7 @@ async def lifespan(_: FastAPI):
     if engine.dialect.name != "postgresql":
         config_columns = {column["name"] for column in inspect(engine).get_columns("meta_table_config")}
         config_migrations = {
-            "target_database_name": "VARCHAR(255) NOT NULL DEFAULT 'BigQuery'",
+            "target_database_name": "VARCHAR(255) NOT NULL DEFAULT 'PostgreSQL'",
             "description_ai_enabled": "BOOLEAN NOT NULL DEFAULT FALSE",
             "description_ai_provider": "VARCHAR(30) NOT NULL DEFAULT 'rules'",
             "description_ai_model": "VARCHAR(120) NOT NULL DEFAULT 'qwen3:latest'",
@@ -404,6 +413,12 @@ def get_meta_table_config(session: Session = Depends(get_session), _: User = Dep
         session.add(config)
         session.commit()
         session.refresh(config)
+    active_target_name = sync_meta_target_database_from_active_target(session)
+    if active_target_name and config.target_database_name != active_target_name:
+        config.target_database_name = active_target_name
+    if session.is_modified(config):
+        session.commit()
+        session.refresh(config)
     return config
 
 
@@ -460,6 +475,7 @@ def update_meta_table_config(payload: MetaTableConfigIn, session: Session = Depe
     config.tables_table_name = payload.tables_table_name
     config.columns_table_name = payload.columns_table_name
     config.target_database_name = payload.target_database_name
+    sync_meta_target_database_from_active_target(session)
     config.description_ai_enabled = payload.description_ai_enabled
     config.description_ai_provider = payload.description_ai_provider
     config.description_ai_model = payload.description_ai_model
@@ -471,6 +487,40 @@ def update_meta_table_config(payload: MetaTableConfigIn, session: Session = Depe
         _check_external_meta_tables(source, config)
     session.refresh(config)
     return config
+
+
+@app.get("/api/admin/datalake-target", response_model=DatalakeTargetOut)
+def get_datalake_target(session: Session = Depends(get_session), _: User = Depends(require("admin:*"))):
+    return target_status(session)
+
+
+@app.post("/api/admin/datalake-target/test")
+def test_datalake_target(payload: DatalakeTargetConnectionIn, _: User = Depends(require("admin:*"))):
+    return test_target_connection(payload)
+
+
+@app.post("/api/admin/datalake-target", response_model=DatalakeTargetOut, status_code=201)
+def save_datalake_target(
+    payload: DatalakeTargetConnectionIn,
+    session: Session = Depends(get_session),
+    actor: User = Depends(require("admin:*")),
+):
+    return create_target(session, payload, actor=actor.email, tester=test_target_connection)
+
+
+@app.post("/api/admin/datalake-target/replace", response_model=DatalakeTargetOut)
+def replace_datalake_target(
+    payload: DatalakeTargetReplaceIn,
+    session: Session = Depends(get_session),
+    actor: User = Depends(require("admin:*")),
+):
+    connection = DatalakeTargetConnectionIn.model_validate(payload.model_dump(exclude={"confirm_replace"}))
+    return replace_target(session, connection, actor=actor.email, tester=test_target_connection)
+
+
+@app.post("/api/admin/datalake-target/retest")
+def retest_datalake_target(session: Session = Depends(get_session), _: User = Depends(require("admin:*"))):
+    return retest_target(session, tester=test_target_connection)
 
 
 @app.get("/api/sources", response_model=list[DataSourceOut])
@@ -1464,7 +1514,9 @@ def _register_metadata_external(payload: MetaRegisterIn, snapshot: SchemaSnapsho
             table_count = column_count = 0
             audit_now = datetime.now(timezone.utc)
             source_database = snapshot.payload.get("database") or ""
-            target_database_name = config.target_database_name or "BigQuery"
+            target_database_name = config.target_database_name
+            if not target_database_name:
+                raise HTTPException(409, "Datalake 대상 DB를 먼저 설정하세요.")
             for table_name in payload.table_names:
                 owner, table, object_type = available[table_name]
                 table_key = {"system_cd": payload.system_cd, "instance_name": snapshot.payload.get("source", ""), "postfix": payload.postfix, "owner": owner, "table_name": table_name}
@@ -1520,6 +1572,11 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
     if not snapshot:
         raise HTTPException(404, "선택한 수집 스냅샷을 찾을 수 없습니다.")
     config = session.get(MetaTableConfig, 1)
+    active_target_name = sync_meta_target_database_from_active_target(session)
+    config = session.get(MetaTableConfig, 1)
+    target_database_name = active_target_name or (config.target_database_name if config else None)
+    if not target_database_name:
+        raise HTTPException(409, "Datalake 대상 DB를 먼저 설정하세요.")
     if config and config.source_type == "external":
         if config.external_source_id is None:
             raise HTTPException(400, "외부 DB 메타 등록 설정에 접속정보가 없습니다.")
@@ -1534,7 +1591,6 @@ def register_metadata(payload: MetaRegisterIn, session: Session = Depends(get_se
     if missing:
         raise HTTPException(400, f"수집 결과에 없는 테이블이 포함되어 있습니다: {', '.join(missing[:10])}")
     source_database = snapshot.payload.get("database") or ""
-    target_database_name = config.target_database_name if config else "BigQuery"
     audit_now = datetime.now(timezone.utc)
     audit_actor = user.email or user.name
     table_count = column_count = 0
@@ -1633,6 +1689,11 @@ def registered_metadata(
     if config and config.source_type == "external":
         return _registered_metadata_external(session, config, page, page_size, q.strip(), instance_name)
     query = select(MetaTableExt)
+    query = query.where(or_(
+        MetaTableExt.instance_name != "ORA_TEST",
+        MetaTableExt.owner.ilike("%TEST%"),
+        MetaTableExt.table_name.ilike("MV_TEST_%"),
+    ))
     search = q.strip()
     if instance_name:
         query = query.where(MetaTableExt.instance_name == instance_name)
@@ -1661,6 +1722,174 @@ def registered_metadata(
     items = [{"system_cd": table.system_cd, "instance_name": table.instance_name, "postfix": table.postfix, "owner": table.owner, "table_name": table.table_name, "table_type": table.table_type or "TABLE", "database_name": table.database_name, "etl_conn_div_cd": table.etl_conn_div_cd, "etl_conn_nm": table.etl_conn_nm, "tgt_ds_cd": table.tgt_ds_cd, "tgt_table_name": table.tgt_table_name, "tgt_database_name": table.tgt_database_name, "comments": table.comments, "lastupdated": table.lastupdated, "createdon": table.createdon, "columns": grouped.get((table.system_cd, table.instance_name, table.postfix, table.owner, table.table_name), [])} for table in tables]
     sources = sorted({source for source in session.scalars(select(MetaTableExt.instance_name).distinct()).all() if source})
     return {"items": items, "total": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size, "sources": sources, "source_counts": source_counts}
+
+
+def _registered_table_spec(session: Session, identity: RegisteredTableIdentity):
+    table = session.scalar(select(MetaTableExt).where(
+        MetaTableExt.system_cd == identity.system_cd,
+        MetaTableExt.instance_name == identity.instance_name,
+        MetaTableExt.postfix == identity.postfix,
+        MetaTableExt.owner == identity.owner,
+        MetaTableExt.table_name == identity.table_name,
+    ))
+    if not table:
+        raise HTTPException(404, "등록 메타 테이블을 찾을 수 없습니다.")
+    columns = session.scalars(select(MetaColumnExt).where(
+        MetaColumnExt.system_cd == identity.system_cd,
+        MetaColumnExt.instance_name == identity.instance_name,
+        MetaColumnExt.postfix == identity.postfix,
+        MetaColumnExt.owner == identity.owner,
+        MetaColumnExt.table_name == identity.table_name,
+    ).order_by(MetaColumnExt.column_id, MetaColumnExt.column_name)).all()
+    metadata = {
+        "system_cd": table.system_cd,
+        "owner": table.owner,
+        "table_name": table.table_name,
+        "tgt_ds_cd": table.tgt_ds_cd or f"ST_{table.system_cd}",
+        "tgt_table_name": table.tgt_table_name or table.table_name,
+        "columns": [{
+            "column_name": column.column_name,
+            "data_type": column.data_type,
+            "data_length": column.data_length,
+            "data_precision": column.data_precision,
+            "data_scale": column.data_scale,
+            "null_yn": column.null_yn,
+            "pk_yn": column.pk_yn,
+            "partition_key_yn": column.partition_key_yn,
+            "update_base_yn": column.update_base_yn,
+        } for column in columns],
+    }
+    return build_table_spec(metadata)
+
+
+@app.post("/api/metadata/registered/datalake-plan")
+def create_datalake_plan(identity: RegisteredTableIdentity, session: Session = Depends(get_session), _: User = Depends(require("metadata:read"))):
+    config = session.get(MetaTableConfig, 1)
+    if config and config.source_type == "external":
+        raise HTTPException(409, "외부 메타 테이블의 ST/L0 생성 계획은 다음 단계에서 지원합니다.")
+    try:
+        spec = _registered_table_spec(session, identity)
+        scripts = render_postgresql_procedure_scripts(spec)
+        try:
+            ddl = render_postgresql_ddl(spec, include_procedure=False)
+        except ValueError as error:
+            return {"status": "BLOCKED", "engine": "postgresql", "strategy": spec.strategy, "st_schema": spec.st_schema, "st_table": spec.st_table, "l0_schema": spec.l0_schema, "l0_table": spec.l0_table, "procedure_name": spec.procedure_name, "pk_columns": list(spec.pk_columns), "partition_column": spec.partition_column, "update_base_columns": list(spec.update_base_columns), "blocking_reasons": [str(error)], "ddl": None, "procedure_scripts": scripts}
+    except HTTPException:
+        raise
+    except ValueError as error:
+        return {"status": "BLOCKED", "strategy": "MANUAL_REQUIRED", "blocking_reasons": [str(error)], "ddl": None, "procedure_scripts": {}}
+    fingerprint = hashlib.sha256(ddl.encode("utf-8")).hexdigest()
+    return {"status": "READY", "engine": "postgresql", "strategy": spec.strategy, "st_schema": spec.st_schema, "st_table": spec.st_table, "l0_schema": spec.l0_schema, "l0_table": spec.l0_table, "procedure_name": spec.procedure_name, "pk_columns": list(spec.pk_columns), "partition_column": spec.partition_column, "update_base_columns": list(spec.update_base_columns), "recommended_reason": scripts.get(spec.strategy if spec.strategy != "PERIOD_REPLACE" else "DELETE_INSERT", {}).get("reason", ""), "fingerprint": fingerprint, "ddl": ddl, "procedure_scripts": scripts}
+
+
+@app.post("/api/metadata/registered/datalake-status")
+def registered_datalake_status(identities: list[RegisteredTableIdentity], session: Session = Depends(get_session), _: User = Depends(require("metadata:read"))):
+    results = []
+    inspect_items = []
+    specs = {}
+    for identity in identities:
+        key = "|".join([identity.system_cd, identity.instance_name, identity.postfix, identity.owner, identity.table_name])
+        try:
+            spec = _registered_table_spec(session, identity)
+            specs[key] = spec
+            expected_procedure = {
+                "MERGE": f"SP_MRG_{spec.l0_table}",
+                "PERIOD_REPLACE": f"SP_DEL_INS_{spec.l0_table}",
+                "TRUNCATE_INSERT": f"SP_TRUNC_INS_{spec.l0_table}",
+            }.get(spec.strategy)
+            inspect_items.append({"key": key, "schema": spec.l0_schema, "table": spec.l0_table, "st_schema": spec.st_schema, "st_table": spec.st_table, "procedures": [expected_procedure] if expected_procedure else []})
+        except ValueError as error:
+            results.append({"key": key, "status": "BLOCKED", "message": str(error)})
+    try:
+        inspected = {item["key"]: item for item in inspect_postgresql_objects(inspect_items)} if inspect_items else {}
+    except Exception:
+        inspected = {}
+        for key in specs:
+            results.append({"key": key, "status": "UNKNOWN", "message": "PostgreSQL Target 상태를 확인할 수 없습니다."})
+    existing_keys = {item["key"] for item in results}
+    for key, spec in specs.items():
+        if key in existing_keys:
+            continue
+        item = inspected.get(key)
+        if not item:
+            results.append({"key": key, "status": "UNKNOWN", "message": "PostgreSQL Target 상태를 확인할 수 없습니다."})
+            continue
+        procedure_count = len(item["procedures"])
+        expected_procedure_count = 1 if spec.strategy in {"MERGE", "PERIOD_REPLACE", "TRUNCATE_INSERT"} else 0
+        status = "CREATED" if item["table_exists"] and procedure_count == expected_procedure_count else "PARTIAL" if item["table_exists"] or procedure_count else "NOT_CREATED"
+        results.append({"key": key, "status": status, "st_table_exists": item.get("st_table_exists", False), "table_exists": item["table_exists"], "procedures": item["procedures"], "procedure_ddls": item.get("procedure_ddls", {}), "recommended_strategy": spec.strategy})
+    return {"items": results}
+
+
+@app.post("/api/metadata/registered/datalake-objects/apply-ddl")
+def apply_registered_datalake_ddl(identities: list[RegisteredTableIdentity], session: Session = Depends(get_session), actor: User = Depends(require("metadata:write"))):
+    target = target_status(session)
+    if not target.get("configured") or target.get("target_type") != "postgresql":
+        raise HTTPException(409, "현재는 PostgreSQL Datalake Target에만 ST/L0 생성을 적용할 수 있습니다.")
+    results = []
+    for identity in identities:
+        key = "|".join([identity.system_cd, identity.instance_name, identity.postfix, identity.owner, identity.table_name])
+        try:
+            spec = _registered_table_spec(session, identity)
+            ddl = render_postgresql_ddl(spec, include_procedure=False)
+            result = apply_postgresql_ddl(ddl)
+            results.append({**result, "key": key, "status": "CREATED", "strategy": spec.strategy, "fingerprint": hashlib.sha256(ddl.encode("utf-8")).hexdigest()})
+        except Exception as error:
+            results.append({"key": key, "status": "FAILED", "message": explain_postgresql_error(error)})
+    return {"actor": actor.email, "items": results}
+
+
+@app.post("/api/metadata/registered/datalake-procedure/apply")
+def apply_registered_datalake_procedure(payload: RegisteredProcedureApplyIn, strategy: str = Query(...), confirm: bool = Query(False), session: Session = Depends(get_session), actor: User = Depends(require("metadata:write"))):
+    if not confirm:
+        raise HTTPException(400, "L0 저장 프로시저 적용은 confirm=true 확인이 필요합니다.")
+    if strategy not in {"MERGE", "DELETE_INSERT", "TRUNCATE_INSERT"}:
+        raise HTTPException(422, "지원하지 않는 L0 저장 방식입니다.")
+    target = target_status(session)
+    if not target.get("configured") or target.get("target_type") != "postgresql":
+        raise HTTPException(409, "현재는 PostgreSQL Datalake Target에만 프로시저를 적용할 수 있습니다.")
+    try:
+        spec = _registered_table_spec(session, payload)
+        generated = render_postgresql_procedure_scripts(spec)[strategy]
+        if not generated["available"]:
+            raise ValueError(generated["reason"])
+        script_sql = payload.ddl_sql.strip() if payload.ddl_sql else generated["sql"]
+        expected_name = generated["procedure_name"].lower()
+        normalized_sql = script_sql.lower()
+        if not re.search(r"^\s*create\s+or\s+replace\s+procedure\b", normalized_sql):
+            raise ValueError("DDL은 CREATE OR REPLACE PROCEDURE 문으로 시작해야 합니다.")
+        if expected_name not in normalized_sql:
+            raise ValueError("수정한 DDL의 프로시저명이 추천 프로시저명과 일치하지 않습니다.")
+        if re.search(r"\b(drop|alter)\s+", normalized_sql):
+            raise ValueError("DROP, ALTER 구문은 수정 DDL에 사용할 수 없습니다.")
+        result = apply_postgresql_ddl(script_sql)
+        return {"actor": actor.email, "strategy": strategy, "procedure_name": generated["procedure_name"], "fingerprint": hashlib.sha256(script_sql.encode("utf-8")).hexdigest(), **result}
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    except Exception as error:
+        raise HTTPException(502, "선택한 L0 저장 프로시저 적용에 실패했습니다.") from error
+
+
+@app.post("/api/metadata/registered/datalake-plan/apply")
+def apply_datalake_plan(identity: RegisteredTableIdentity, confirm: bool = Query(False), session: Session = Depends(get_session), actor: User = Depends(require("metadata:write"))):
+    if not confirm:
+        raise HTTPException(400, "ST/L0 생성 적용은 confirm=true 확인이 필요합니다.")
+    target = target_status(session)
+    if not target.get("configured") or target.get("target_type") != "postgresql":
+        raise HTTPException(409, "현재는 PostgreSQL Datalake Target에만 ST/L0 생성을 적용할 수 있습니다.")
+    spec = None
+    try:
+        spec = _registered_table_spec(session, identity)
+        ddl = render_postgresql_ddl(spec)
+        result = apply_postgresql_ddl(ddl)
+    except HTTPException:
+        raise
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    except Exception as error:
+        logger.exception("registered datalake plan apply failed: %s.%s.%s", identity.owner, identity.table_name, getattr(spec, "strategy", "unknown"))
+        raise HTTPException(502, f"ST/L0 및 L0 저장 프로시저 적용에 실패했습니다. {explain_postgresql_error(error)}") from error
+    return {**result, "actor": actor.email, "strategy": spec.strategy, "procedure_name": spec.procedure_name, "fingerprint": hashlib.sha256(ddl.encode("utf-8")).hexdigest()}
 
 
 @app.post("/api/metadata/registered/manual-ai/prompt")
@@ -1981,10 +2210,18 @@ def update_registered_metadata(payload: dict, session: Session = Depends(get_ses
     return {"status": "updated"}
 
 
-def _metadata_listing_payload(payload: dict) -> dict:
+def _metadata_listing_payload(payload: dict, source: DataSource | None = None) -> dict:
     compact = dict(payload or {})
     schemas = []
+    oracle_test_only = bool(source and source.db_type.lower() == "oracle" and source.name.upper() == "ORA_TEST")
+    oracle_system_schemas = OracleCatalogProvider.SYSTEM_SCHEMAS
     for schema in compact.get("schemas", []):
+        schema_name = str(schema.get("name", "")).upper()
+        if source and source.db_type.lower() == "oracle":
+            if schema_name in oracle_system_schemas:
+                continue
+            if oracle_test_only and "TEST" not in schema_name:
+                continue
         item = dict(schema)
         procedures = []
         for procedure in item.get("procedures", []):
@@ -2005,7 +2242,8 @@ def _metadata_listing_payload(payload: dict) -> dict:
 def metadata(session: Session = Depends(get_session), _: User = Depends(require("metadata:read"))):
     latest_ids = select(func.max(SchemaSnapshot.id).label("id")).group_by(SchemaSnapshot.data_source_id).subquery()
     snapshots = session.scalars(select(SchemaSnapshot).where(SchemaSnapshot.id.in_(select(latest_ids.c.id))).order_by(desc(SchemaSnapshot.captured_at))).all()
-    return [{"id": item.id, "data_source_id": item.data_source_id, "run_id": item.run_id, "captured_at": item.captured_at, "fingerprint": item.fingerprint, "payload": _metadata_listing_payload(item.payload)} for item in snapshots]
+    sources = {source.id: source for source in session.scalars(select(DataSource)).all()}
+    return [{"id": item.id, "data_source_id": item.data_source_id, "run_id": item.run_id, "captured_at": item.captured_at, "fingerprint": item.fingerprint, "payload": _metadata_listing_payload(item.payload, sources.get(item.data_source_id))} for item in snapshots]
 
 
 @app.get("/api/metadata/sources/{source_id}/history")
@@ -2014,7 +2252,7 @@ def metadata_snapshot_history(source_id: int, limit: int = Query(30, ge=2, le=10
     if not source:
         raise HTTPException(404, "데이터 소스를 찾을 수 없습니다.")
     snapshots = session.scalars(select(SchemaSnapshot).where(SchemaSnapshot.data_source_id == source_id).order_by(desc(SchemaSnapshot.captured_at), desc(SchemaSnapshot.id)).limit(limit)).all()
-    return [snapshot_summary(snapshot) for snapshot in snapshots]
+    return [snapshot_summary(snapshot, _metadata_listing_payload(snapshot.payload, source)) for snapshot in snapshots]
 
 
 @app.get("/api/metadata/sources/{source_id}/storage-history")

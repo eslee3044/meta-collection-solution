@@ -33,6 +33,25 @@ def _key() -> bytes:
     return base64.urlsafe_b64encode(raw)
 
 
+def _credential_key() -> bytes:
+    settings = get_settings()
+    # Existing deployments may fall back to the token key, while new
+    # deployments can isolate credential encryption with a dedicated key.
+    source = settings.credential_encryption_key or settings.secret_key
+    raw = hashlib.sha256(source.encode()).digest()
+    return base64.urlsafe_b64encode(raw)
+
+
+def _credential_decryption_keys() -> list[bytes]:
+    settings = get_settings()
+    keys = [_credential_key()]
+    if settings.credential_encryption_key:
+        legacy = base64.urlsafe_b64encode(hashlib.sha256(settings.secret_key.encode()).digest())
+        if legacy not in keys:
+            keys.append(legacy)
+    return keys
+
+
 def encrypt_json(value: dict) -> str:
     if not value:
         return ""
@@ -46,6 +65,30 @@ def decrypt_json(value: str) -> dict:
         return json.loads(Fernet(_key()).decrypt(value.encode()))
     except (InvalidToken, ValueError, json.JSONDecodeError):
         raise HTTPException(status_code=500, detail="저장된 인증 정보를 복호화할 수 없습니다.")
+
+
+def encrypt_credentials(value: dict) -> str:
+    if not value:
+        return ""
+    token = Fernet(_credential_key()).encrypt(json.dumps(value).encode()).decode()
+    return f"v1:{token}"
+
+
+def decrypt_credentials(value: str) -> dict:
+    if not value:
+        return {}
+    try:
+        version, token = value.split(":", 1)
+        if version != "v1":
+            raise ValueError("unsupported credential version")
+        for key in _credential_decryption_keys():
+            try:
+                return json.loads(Fernet(key).decrypt(token.encode()))
+            except InvalidToken:
+                continue
+        raise InvalidToken
+    except (InvalidToken, ValueError, json.JSONDecodeError):
+        raise HTTPException(status_code=500, detail="저장된 Datalake 인증 정보를 복호화할 수 없습니다.")
 
 
 def create_token(user_id: int) -> str:

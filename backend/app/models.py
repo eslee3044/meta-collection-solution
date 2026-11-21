@@ -75,6 +75,20 @@ class Menu(Base):
     roles: Mapped[list[Role]] = relationship(secondary=role_menus, back_populates="menus")
 
 
+class DatalakeTarget(TimestampMixin, Base):
+    __tablename__ = "datalake_targets"
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    target_type: Mapped[str] = mapped_column(String(40), default="postgresql")
+    secret_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    credential_version: Mapped[int] = mapped_column(default=1)
+    status: Mapped[str] = mapped_column(String(30), default="connected")
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_test_message: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class DataSource(TimestampMixin, Base):
     __tablename__ = "data_sources"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -335,7 +349,7 @@ class MetaTableConfig(TimestampMixin, Base):
     schema_name: Mapped[str] = mapped_column(String(255), default="EAPET")
     tables_table_name: Mapped[str] = mapped_column(String(255), default="TB_META_TABLES_EXT")
     columns_table_name: Mapped[str] = mapped_column(String(255), default="TB_META_COLUMNS_EXT")
-    target_database_name: Mapped[str] = mapped_column(String(255), default="BigQuery")
+    target_database_name: Mapped[str] = mapped_column(String(255), default="PostgreSQL")
     description_ai_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     description_ai_provider: Mapped[str] = mapped_column(String(30), default="rules", nullable=False)
     description_ai_model: Mapped[str] = mapped_column(String(120), default="qwen3:latest", nullable=False)

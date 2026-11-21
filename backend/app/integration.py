@@ -6,8 +6,8 @@ from typing import Any
 from sqlalchemy import Engine, text
 
 
-def snapshot_summary(snapshot: Any) -> dict[str, Any]:
-    payload = snapshot.payload or {}
+def snapshot_summary(snapshot: Any, payload_override: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload_override if payload_override is not None else (snapshot.payload or {})
     schemas = payload.get("schemas", [])
     storage_rows = []
     for schema in schemas:
@@ -16,6 +16,19 @@ def snapshot_summary(snapshot: Any) -> dict[str, Any]:
             if item:
                 storage_rows.append({"schema": schema.get("name"), "table": table.get("name"), "total_bytes": item.get("total_bytes"), "growth_bytes": item.get("growth_bytes"), "growth_percent": item.get("growth_percent")})
     storage_rows.sort(key=lambda item: item.get("growth_bytes") or 0, reverse=True)
+    filtered_storage_summary = None
+    if payload_override is not None:
+        filtered_storage_summary = {"data_bytes": 0, "index_bytes": 0, "total_bytes": 0, "growth_bytes": 0, "observed_tables": 0, "comparable_tables": 0}
+        for schema in schemas:
+            for table in schema.get("tables", []):
+                storage = table.get("storage") or {}
+                if not storage:
+                    continue
+                filtered_storage_summary["observed_tables"] += 1
+                for key in ("data_bytes", "index_bytes", "total_bytes", "growth_bytes"):
+                    filtered_storage_summary[key] += int(storage.get(key) or 0)
+                if storage.get("previous_total_bytes") is not None:
+                    filtered_storage_summary["comparable_tables"] += 1
     return {
         "id": snapshot.id,
         "data_source_id": snapshot.data_source_id,
@@ -30,7 +43,7 @@ def snapshot_summary(snapshot: Any) -> dict[str, Any]:
         "view_count": sum(len(schema.get("views", [])) for schema in schemas),
         "procedure_count": sum(len(schema.get("procedures", [])) for schema in schemas),
         "skipped_schemas": payload.get("skipped_schemas", []),
-        "storage_summary": payload.get("storage_summary"),
+        "storage_summary": filtered_storage_summary if filtered_storage_summary is not None else payload.get("storage_summary"),
         "storage_top_tables": storage_rows[:10],
     }
 

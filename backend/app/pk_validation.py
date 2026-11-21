@@ -124,10 +124,16 @@ def validate_source_data(
                 null_predicate = " OR ".join(f"{column} IS NULL" for column in quoted_columns)
                 null_count = int(connection.execute(text(f"SELECT COUNT(*) FROM {target} WHERE {null_predicate}")).scalar_one())
                 grouped = ", ".join(quoted_columns)
-                duplicate_sql = (
-                    f"SELECT COUNT(*) FROM (SELECT {grouped} FROM {target} "
-                    f"GROUP BY {grouped} HAVING COUNT(*) > 1 LIMIT :duplicate_limit) AS duplicate_groups"
-                )
+                if connection.dialect.name == "oracle":
+                    duplicate_sql = (
+                        f"SELECT COUNT(*) FROM (SELECT {grouped} FROM {target} "
+                        f"GROUP BY {grouped} HAVING COUNT(*) > 1 FETCH FIRST :duplicate_limit ROWS ONLY)"
+                    )
+                else:
+                    duplicate_sql = (
+                        f"SELECT COUNT(*) FROM (SELECT {grouped} FROM {target} "
+                        f"GROUP BY {grouped} HAVING COUNT(*) > 1 LIMIT :duplicate_limit) AS duplicate_groups"
+                    )
                 duplicate_count = int(connection.execute(text(duplicate_sql), {"duplicate_limit": duplicate_limit}).scalar_one())
     except Exception:
         return _unavailable()

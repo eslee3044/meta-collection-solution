@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     database_user: str | None = None
     database_password: str | None = None
     secret_key: str = "dev-only-change-me"
+    credential_encryption_key: str | None = None
     admin_email: str = "admin@example.com"
     admin_password: str = "Admin123!"
     cors_origins: str = "http://localhost:5173"

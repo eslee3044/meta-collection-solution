@@ -102,6 +102,42 @@ def test_column_prompt_includes_full_table_context(monkeypatch):
 
 
 
+def test_column_ollama_request_requires_every_target_in_json_schema(monkeypatch):
+    import json
+
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"response": json.dumps({
+                "OPER": ["작업 식별 정보"],
+                "ACTIVE": ["활성 여부"],
+            })}).encode()
+
+    def fake_urlopen(request, **kwargs):
+        captured["payload"] = json.loads(request.data.decode())
+        return Response()
+
+    monkeypatch.setattr("app.ai_description.urlopen", fake_urlopen)
+    result = suggest_descriptions([
+        {"column_name": "OPER", "data_type": "NUMBER", "comments": ""},
+        {"column_name": "ACTIVE", "data_type": "CHAR", "comments": ""},
+    ], provider="ollama", table_name="WLM_CLASSIFIER_PLAN")
+
+    schema = captured["payload"]["format"]
+    assert schema["type"] == "object"
+    assert schema["required"] == ["OPER", "ACTIVE"]
+    assert set(schema["properties"]) == {"OPER", "ACTIVE"}
+    assert [item["method"] for item in result] == ["local-ollama", "local-ollama"]
+
+
+
 def test_date_column_recommendation_falls_back_to_rules(monkeypatch):
     from app.ai_description import recommend_date_columns
 

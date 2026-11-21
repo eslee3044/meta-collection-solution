@@ -1,7 +1,8 @@
 from datetime import datetime
+import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class LoginRequest(BaseModel):
@@ -213,13 +214,66 @@ class ManualAiApplyIn(ManualAiResponseIn):
     selected_pk_indexes: list[int] = Field(default_factory=list, max_length=4)
 
 
+class DatalakeTargetConnectionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_type: Literal["postgresql", "bigquery", "redshift"] = "postgresql"
+    host: str | None = Field(default=None, max_length=255)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    database: str | None = Field(default=None, max_length=255)
+    username: str | None = Field(default=None, max_length=255)
+    password: str | None = Field(default=None, max_length=512)
+    ssl_mode: Literal["disable", "prefer", "require"] = "prefer"
+    connect_timeout: int = Field(default=5, ge=1, le=30)
+    project_id: str | None = Field(default=None, max_length=255)
+    dataset: str | None = Field(default=None, max_length=1024)
+    location: str | None = Field(default=None, max_length=120)
+    service_account_json: str | None = Field(default=None, max_length=131_072)
+
+    @model_validator(mode="after")
+    def validate_target_fields(self):
+        if self.target_type in {"postgresql", "redshift"}:
+            missing = [name for name in ("host", "database", "username", "password") if not getattr(self, name)]
+            if missing:
+                raise ValueError(f"{self.target_type} 접속정보 필수값이 없습니다: {', '.join(missing)}")
+            if self.port is None:
+                self.port = 5439 if self.target_type == "redshift" else 5432
+            return self
+        missing = [name for name in ("project_id", "dataset", "service_account_json") if not getattr(self, name)]
+        if missing:
+            raise ValueError(f"BigQuery 접속정보 필수값이 없습니다: {', '.join(missing)}")
+        try:
+            credentials = json.loads(self.service_account_json or "")
+        except json.JSONDecodeError as exc:
+            raise ValueError("BigQuery 서비스 계정 JSON 형식이 올바르지 않습니다.") from exc
+        required = ("project_id", "private_key", "client_email", "token_uri")
+        if not isinstance(credentials, dict) or any(not credentials.get(name) for name in required):
+            raise ValueError("BigQuery 서비스 계정 JSON에 필수 인증 항목이 없습니다.")
+        return self
+
+
+class DatalakeTargetReplaceIn(DatalakeTargetConnectionIn):
+    confirm_replace: Literal[True]
+
+
+class DatalakeTargetOut(BaseModel):
+    configured: bool
+    target_type: str | None = None
+    status: str
+    credential_configured: bool
+    connection_summary: dict[str, Any] = Field(default_factory=dict)
+    dedicated_encryption_key: bool
+    last_tested_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
 class MetaTableConfigIn(BaseModel):
     source_type: Literal["internal", "external"] = "internal"
     external_source_id: int | None = None
     schema_name: str = Field(default="EAPET", min_length=1, max_length=255)
     tables_table_name: str = Field(default="TB_META_TABLES_EXT", min_length=1, max_length=255)
     columns_table_name: str = Field(default="TB_META_COLUMNS_EXT", min_length=1, max_length=255)
-    target_database_name: str = Field(default="BigQuery", min_length=1, max_length=255)
+    target_database_name: str = Field(default="PostgreSQL", min_length=1, max_length=255)
     description_ai_enabled: bool = False
     description_ai_provider: Literal["rules", "ollama", "manual"] = "rules"
     description_ai_model: str = Field(default="qwen3:latest", min_length=1, max_length=120)
@@ -239,7 +293,7 @@ class MetaRegisterIn(BaseModel):
     etl_conn_div_cd: Literal["Oracle", "ODBC"]
     etl_conn_nm: str = Field(min_length=1, max_length=255)
     tgt_ds_cd: str = Field(pattern=r"^ST_[A-Z][A-Z0-9]{2}[A-Z0-9_]$")
-    tgt_database_name: str = Field(default="BigQuery", min_length=1, max_length=255)
+    tgt_database_name: str = Field(default="PostgreSQL", min_length=1, max_length=255)
     instance_div_cd: str = Field(default="", max_length=32)
     target_name_suffix: str = Field(default="", max_length=32)
     columns_by_table: dict[str, list[str]] | None = None
@@ -266,6 +320,10 @@ class RegisteredTableIdentity(StrictSchema):
     postfix: str = Field(default="", max_length=32)
     owner: str = Field(min_length=1, max_length=255)
     table_name: str = Field(min_length=1, max_length=255)
+
+
+class RegisteredProcedureApplyIn(RegisteredTableIdentity):
+    ddl_sql: str | None = Field(default=None, max_length=100000)
 
 
 class PkCandidate(StrictSchema):

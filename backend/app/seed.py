@@ -28,6 +28,7 @@ MENUS = [
     ("users", "사용자 관리", "/users", "Users", 6),
     ("roles", "역할 및 권한", "/roles", "ShieldCheck", 7),
     ("system", "시스템 관리", "/system", "Server", 8),
+    ("datalake-target", "Datalake 대상 DB", "/datalake-target", "Database", 9),
 ]
 
 

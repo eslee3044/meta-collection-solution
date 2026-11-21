@@ -10,6 +10,15 @@ from .base import CatalogProvider
 class OracleCatalogProvider:
     """Oracle DBA catalog access separated from the collection orchestration."""
 
+    SYSTEM_SCHEMAS = {
+        "SYS", "SYSTEM", "DBSNMP", "SYSMAN", "OUTLN", "XDB", "CTXSYS", "MDSYS",
+        "ORDSYS", "ORDDATA", "WMSYS", "OLAPSYS", "DVSYS", "DVF", "LBACSYS",
+        "GSMADMIN_INTERNAL", "GSMCATUSER", "GSMUSER", "GGSYS", "GGSHAREDCAP",
+        "AUDSYS", "ANONYMOUS", "APPQOSSYS", "DIP", "REMOTE_SCHEDULER_AGENT",
+        "SYSBACKUP", "SYSDG", "SYSKM", "SYSRAC", "BAASSYS", "DGPDB_INT",
+        "DBSFWUSER", "VECSYS", "XS$NULL",
+    }
+
     def __init__(self, source: DataSource):
         self.source = source
 
@@ -20,7 +29,13 @@ class OracleCatalogProvider:
         return ["procedures", "permissions", "tables", "views"]
 
     def schema_query(self) -> str:
-        return "SELECT username AS name FROM dba_users ORDER BY username"
+        return """
+            SELECT username AS name
+            FROM dba_users
+            WHERE NVL(oracle_maintained, 'N') = 'N'
+              AND username NOT IN ('SYS', 'SYSTEM', 'DBSNMP', 'SYSMAN', 'OUTLN', 'XDB', 'CTXSYS', 'MDSYS', 'ORDSYS', 'ORDDATA', 'WMSYS', 'OLAPSYS', 'DVSYS', 'DVF', 'LBACSYS', 'GSMADMIN_INTERNAL', 'GSMCATUSER', 'GSMUSER', 'GGSYS', 'GGSHAREDCAP', 'AUDSYS', 'ANONYMOUS', 'APPQOSSYS', 'DIP', 'REMOTE_SCHEDULER_AGENT', 'SYSBACKUP', 'SYSDG', 'SYSKM', 'SYSRAC', 'BAASSYS', 'DGPDB_INT', 'DBSFWUSER', 'VECSYS', 'XS$NULL')
+            ORDER BY username
+        """
 
     def _rows(self, connection: Connection, query: str, params: dict[str, Any] | None = None) -> list[dict]:
         mapped = connection.execute(text(query), params or {}).mappings()
@@ -28,7 +43,7 @@ class OracleCatalogProvider:
         return [dict(row) for row in rows]
 
     def schema_names(self, connection: Connection) -> list[str]:
-        return sorted({str(row["name"]).upper() for row in self._rows(connection, self.schema_query())})
+        return sorted({name for name in (str(row["name"]).upper() for row in self._rows(connection, self.schema_query())) if name not in self.SYSTEM_SCHEMAS})
 
     def table_names(self, connection: Connection, schema_name: str) -> list[str]:
         rows = self._rows(

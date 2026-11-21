@@ -15,7 +15,6 @@ services:
       timeout: 5s
       retries: 10
   api:
-    platform: linux/amd64
     build: ./backend
     depends_on:
       postgres:
@@ -27,6 +26,7 @@ services:
       METAVAULT_DATABASE_USER: "${METAVAULT_DATABASE_USER:-metavault}"
       METAVAULT_DATABASE_PASSWORD: "${METAVAULT_DB_PASSWORD:?METAVAULT_DB_PASSWORD must be set}"
       METAVAULT_SECRET_KEY: "${METAVAULT_SECRET_KEY:?METAVAULT_SECRET_KEY must be set}"
+      METAVAULT_CREDENTIAL_ENCRYPTION_KEY: "${METAVAULT_CREDENTIAL_ENCRYPTION_KEY:-}"
       METAVAULT_ADMIN_EMAIL: ${METAVAULT_ADMIN_EMAIL:-admin@example.com}
       METAVAULT_ADMIN_PASSWORD: "${METAVAULT_ADMIN_PASSWORD:?METAVAULT_ADMIN_PASSWORD must be set}"
       METAVAULT_CORS_ORIGINS: http://localhost:8090
@@ -52,7 +52,6 @@ services:
       timeout: 5s
       retries: 5
   worker:
-    platform: linux/amd64
     build: ./backend
     command: ["python", "-m", "app.worker"]
     depends_on:
@@ -67,6 +66,7 @@ services:
       METAVAULT_DATABASE_USER: "${METAVAULT_DATABASE_USER:-metavault}"
       METAVAULT_DATABASE_PASSWORD: "${METAVAULT_DB_PASSWORD:?METAVAULT_DB_PASSWORD must be set}"
       METAVAULT_SECRET_KEY: "${METAVAULT_SECRET_KEY:?METAVAULT_SECRET_KEY must be set}"
+      METAVAULT_CREDENTIAL_ENCRYPTION_KEY: "${METAVAULT_CREDENTIAL_ENCRYPTION_KEY:-}"
       METAVAULT_ADMIN_EMAIL: ${METAVAULT_ADMIN_EMAIL:-admin@example.com}
       METAVAULT_ADMIN_PASSWORD: "${METAVAULT_ADMIN_PASSWORD:?METAVAULT_ADMIN_PASSWORD must be set}"
       METAVAULT_CORS_ORIGINS: http://localhost:8090

@@ -152,6 +152,8 @@ def test_docker_supports_sql_server_and_oracle(monkeypatch):
     assert is_supported_db_type("mssql")
     assert is_supported_db_type("oracle")
     assert is_supported_db_type("postgresql")
+    assert "db2" not in supported_db_types()
+    assert not is_supported_db_type("db2")
 
 
 def test_collection_item_selection_excludes_unselected_objects(tmp_path: Path):
