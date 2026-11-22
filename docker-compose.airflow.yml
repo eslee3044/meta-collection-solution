@@ -39,11 +39,14 @@ services:
       - ./datalake:/var/lib/metavault/datalake
     command: >-
       bash -c "airflow db migrate &&
-      (airflow users create
+      (airflow users reset-password
+      --username \"$${_AIRFLOW_WWW_USER_USERNAME}\"
+      --password \"$${_AIRFLOW_WWW_USER_PASSWORD}\" ||
+      airflow users create
       --username \"$${_AIRFLOW_WWW_USER_USERNAME}\"
       --password \"$${_AIRFLOW_WWW_USER_PASSWORD}\"
       --firstname MetaVault --lastname Admin
-      --role Admin --email \"$${METAVAULT_ADMIN_EMAIL:-admin@example.com}\" || true)"
+      --role Admin --email \"$${METAVAULT_ADMIN_EMAIL:-admin@example.com}\")"
 
   airflow-scheduler:
     image: apache/airflow:2.10.5-python3.11

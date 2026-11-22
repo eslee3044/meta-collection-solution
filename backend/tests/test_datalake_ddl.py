@@ -1,4 +1,4 @@
-from app.datalake_ddl import build_table_spec, render_postgresql_ddl, render_postgresql_procedure_scripts
+from app.datalake_ddl import build_table_spec, render_postgresql_ddl, render_postgresql_procedure_scripts, table_spec_fingerprint
 
 
 def _metadata(**overrides):
@@ -120,3 +120,18 @@ def test_unsafe_procedure_modes_are_generated_as_blocked_not_silently_applied():
     assert "PK" in scripts["MERGE"]["reason"]
     assert scripts["DELETE_INSERT"]["available"] is True
     assert scripts["TRUNCATE_INSERT"]["available"] is True
+
+
+def test_dimensions_and_nullability_are_part_of_canonical_spec_and_fingerprint():
+    spec = build_table_spec(_metadata(columns=[
+        {"column_name": "ID", "data_type": "VARCHAR2", "data_length": 120, "null_yn": "N", "pk_yn": "Y"},
+        {"column_name": "AMOUNT", "data_type": "NUMBER", "data_precision": 12, "data_scale": 2, "null_yn": "Y", "update_base_yn": "Y"},
+    ]))
+    ddl = render_postgresql_ddl(spec)
+    assert '"ID" VARCHAR(120) NOT NULL' in ddl
+    assert '"AMOUNT" NUMERIC(12,2)' in ddl
+    changed = build_table_spec(_metadata(columns=[
+        {"column_name": "ID", "data_type": "VARCHAR2", "data_length": 121, "null_yn": "N", "pk_yn": "Y"},
+        {"column_name": "AMOUNT", "data_type": "NUMBER", "data_precision": 12, "data_scale": 2, "null_yn": "Y", "update_base_yn": "Y"},
+    ]))
+    assert table_spec_fingerprint(spec) != table_spec_fingerprint(changed)

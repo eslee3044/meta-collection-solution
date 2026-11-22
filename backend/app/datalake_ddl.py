@@ -1,8 +1,10 @@
 """Canonical ST/L0 table specification and PostgreSQL DDL renderer."""
 from __future__ import annotations
 
+import hashlib
+import json
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -13,6 +15,9 @@ class ColumnSpec:
     name: str
     data_type: str
     nullable: bool = True
+    length: int | None = None
+    precision: int | None = None
+    scale: int | None = None
 
 
 @dataclass(frozen=True)
@@ -48,26 +53,41 @@ def _qualified(schema: str, table: str) -> str:
     return f"{_quote(schema)}.{_quote(table)}"
 
 
-def _type(value: Any) -> str:
+def _type(value: Any, *, length: Any = None, precision: Any = None, scale: Any = None) -> str:
     raw = str(value or "TEXT").strip().upper()
     raw = re.sub(r"\s+COLLATE\s+.*$", "", raw).strip()
-    if raw.startswith(("NUMBER", "DECIMAL", "NUMERIC")):
-        return raw.replace("NUMBER", "NUMERIC", 1)
-    if raw.startswith(("VARCHAR2", "NVARCHAR2")):
-        return raw.replace("VARCHAR2", "VARCHAR", 1).replace("NVARCHAR2", "VARCHAR", 1)
-    if raw.startswith(("INT", "INTEGER", "BIGINT", "SMALLINT")):
-        return "BIGINT" if raw.startswith("BIGINT") else "INTEGER"
-    if raw.startswith(("TIMESTAMP", "DATETIME")):
+    base = re.split(r"\s*\(", raw, maxsplit=1)[0].strip()
+    try:
+        length_value = int(length) if length not in (None, "") else None
+    except (TypeError, ValueError):
+        length_value = None
+    try:
+        precision_value = int(precision) if precision not in (None, "") else None
+    except (TypeError, ValueError):
+        precision_value = None
+    try:
+        scale_value = int(scale) if scale not in (None, "") else None
+    except (TypeError, ValueError):
+        scale_value = None
+    if base in {"NUMBER", "DECIMAL", "NUMERIC"}:
+        if precision_value is not None:
+            return f"NUMERIC({precision_value},{scale_value or 0})"
+        return "NUMERIC"
+    if base in {"VARCHAR2", "NVARCHAR2", "VARCHAR", "CHAR", "NCHAR"}:
+        return f"VARCHAR({length_value})" if length_value is not None else "VARCHAR"
+    if base in {"INT", "INTEGER", "BIGINT", "SMALLINT"}:
+        return "BIGINT" if base == "BIGINT" else "INTEGER"
+    if base in {"TIMESTAMP", "DATETIME"}:
         return "TIMESTAMPTZ" if "TIME ZONE" in raw else "TIMESTAMP"
-    if raw.startswith("DATE"):
+    if base == "DATE":
         return "DATE"
-    if raw.startswith(("FLOAT", "DOUBLE", "REAL")):
+    if base in {"FLOAT", "DOUBLE", "REAL"}:
         return "DOUBLE PRECISION"
-    if raw.startswith(("BOOL", "BOOLEAN")):
+    if base in {"BOOL", "BOOLEAN"}:
         return "BOOLEAN"
-    if raw.startswith(("BYTEA", "BLOB", "RAW")):
+    if base in {"BYTEA", "BLOB", "RAW"}:
         return "BYTEA"
-    if raw.startswith(("TEXT", "CLOB", "LONGVARCHAR")):
+    if base in {"TEXT", "CLOB", "LONGVARCHAR"}:
         return "TEXT"
     return raw if re.fullmatch(r"[A-Z][A-Z0-9_]*(\s*\([0-9, ]+\))?", raw) else "TEXT"
 
@@ -90,8 +110,11 @@ def build_table_spec(metadata: Mapping[str, Any]) -> TableSpec:
     columns = tuple(
         ColumnSpec(
             name=_identifier(column.get("column_name") or column.get("name"), "column"),
-            data_type=_type(column.get("data_type") or column.get("type")),
-            nullable=not (_yes(column, "null_yn") is False and str(column.get("null_yn", "")).strip()),
+            data_type=_type(column.get("data_type") or column.get("type"), length=column.get("data_length"), precision=column.get("data_precision"), scale=column.get("data_scale")),
+            nullable=str(column.get("null_yn", "")).upper() not in {"N", "NO", "FALSE", "0"},
+            length=column.get("data_length"),
+            precision=column.get("data_precision"),
+            scale=column.get("data_scale"),
         )
         for column in raw_columns
     )
@@ -115,6 +138,12 @@ def build_table_spec(metadata: Mapping[str, Any]) -> TableSpec:
     strategy = "MERGE" if pk and updates else "PERIOD_REPLACE" if partition else "TRUNCATE_INSERT"
     procedure = {"MERGE": f"SP_MRG_{l0_table}", "PERIOD_REPLACE": f"SP_DEL_INS_{l0_table}", "TRUNCATE_INSERT": f"SP_TRUNC_INS_{l0_table}"}[strategy]
     return TableSpec(system, owner, source_table, st_schema, l0_schema, st_table, l0_table, procedure, columns, pk, updates, partition, strategy, tuple(reasons))
+
+
+def table_spec_fingerprint(spec: TableSpec) -> str:
+    payload = asdict(spec)
+    payload["columns"] = [asdict(column) for column in spec.columns]
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _standard_columns() -> tuple[ColumnSpec, ...]:

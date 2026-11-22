@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+import base64
+import json
+import re
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+from fastapi import HTTPException
+
+from .config import get_settings
+
+
+def _safe_name(value: str, prefix: str) -> str:
+    value = re.sub(r"[^a-zA-Z0-9_-]+", "_", value).strip("_").lower()
+    return f"{prefix}_{value or 'source'}"[:250]
+
+
+def runtime_names(source_name: str) -> tuple[str, str]:
+    key = _safe_name(source_name, "source")
+    return f"{key}_conn", f"{key}_pool"
+
+
+def _request(method: str, path: str, payload: dict[str, Any] | None = None) -> tuple[int, dict[str, Any] | None]:
+    settings = get_settings()
+    if not settings.airflow_username or not settings.airflow_password:
+        raise HTTPException(status_code=503, detail="Airflow 자동 준비 설정이 없습니다. 관리자에게 Airflow API 설정을 요청하세요.")
+    url = f"{settings.airflow_api_url.rstrip('/')}/{path.lstrip('/')}"
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    token = base64.b64encode(f"{settings.airflow_username}:{settings.airflow_password}".encode()).decode()
+    headers["Authorization"] = f"Basic {token}"
+    request = Request(url, data=json.dumps(payload).encode() if payload is not None else None, headers=headers, method=method)
+    try:
+        with urlopen(request, timeout=10) as response:
+            raw = response.read().decode()
+            return response.status, json.loads(raw) if raw else None
+    except HTTPError as exc:
+        if exc.code == 404:
+            return 404, None
+        raise HTTPException(status_code=502, detail=f"Airflow API 요청에 실패했습니다. HTTP {exc.code}") from exc
+    except (URLError, TimeoutError) as exc:
+        raise HTTPException(status_code=502, detail="Airflow API에 연결하지 못했습니다. Airflow 상태와 API 주소를 확인하세요.") from exc
+
+
+def prepare_source_runtime(*, source: Any, credential_mode: str, dedicated_username: str | None, dedicated_password: str | None, pool_slots: int, confirm_pool_resize: bool) -> dict[str, Any]:
+    from .security import decrypt_json
+
+    secret = decrypt_json(source.secret_encrypted) if source.secret_encrypted else {}
+    if credential_mode == "dedicated":
+        if not dedicated_username or not dedicated_password:
+            raise HTTPException(status_code=400, detail="별도 적재 계정은 사용자명과 비밀번호를 모두 입력해야 합니다.")
+        username, password = dedicated_username, dedicated_password
+    else:
+        username, password = source.username, secret.get("password", "")
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="메타 수집 계정 접속정보가 등록되어 있지 않습니다.")
+
+    connection_id, pool_name = runtime_names(source.name)
+    connection_payload = {
+        "connection_id": connection_id,
+        "conn_type": source.db_type,
+        "host": source.host,
+        "port": source.port,
+        "login": username,
+        "password": password,
+        "schema": source.database or None,
+        "extra": json.dumps({"metavault_source_id": source.id, "credential_mode": credential_mode}),
+    }
+    status, _ = _request("GET", f"connections/{connection_id}")
+    if status == 404:
+        _request("POST", "connections", connection_payload)
+        connection_action = "created"
+    else:
+        connection_action = "reused"
+
+    status, pool = _request("GET", f"pools/{pool_name}")
+    if status == 404:
+        _request("POST", "pools", {"name": pool_name, "slots": pool_slots, "description": f"MetaVault source pool for {source.name}"})
+        pool_action, effective_slots = "created", pool_slots
+    else:
+        effective_slots = int((pool or {}).get("slots", pool_slots))
+        if effective_slots != pool_slots:
+            if not confirm_pool_resize:
+                return {"status": "CONFIRM_REQUIRED", "connection_id": connection_id, "connection_action": connection_action, "pool_name": pool_name, "current_slots": effective_slots, "requested_slots": pool_slots, "credential_mode": credential_mode}
+            _request("PATCH", f"pools/{pool_name}", {"slots": pool_slots, "description": f"MetaVault source pool for {source.name}"})
+            pool_action, effective_slots = "resized", pool_slots
+        else:
+            pool_action = "reused"
+    return {"status": "READY", "connection_id": connection_id, "connection_action": connection_action, "pool_name": pool_name, "pool_action": pool_action, "pool_slots": effective_slots, "credential_mode": credential_mode}

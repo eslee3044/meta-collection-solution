@@ -326,6 +326,62 @@ class RegisteredProcedureApplyIn(RegisteredTableIdentity):
     ddl_sql: str | None = Field(default=None, max_length=100000)
 
 
+class RegisteredDatalakePlanApplyIn(RegisteredTableIdentity):
+    spec_fingerprint: str = Field(min_length=64, max_length=64)
+    ddl_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
+    acknowledgements: list[str] = Field(default_factory=list)
+
+
+class SourceRuntimePrepareIn(RegisteredTableIdentity):
+    pool_slots: int = Field(default=2, ge=1, le=32)
+    confirm_pool_resize: bool = False
+    credential_mode: Literal["metadata", "dedicated"] = "metadata"
+    dedicated_username: str | None = Field(default=None, max_length=255)
+    dedicated_password: str | None = Field(default=None, max_length=512)
+
+
+class LoadPlanRecommendationIn(RegisteredTableIdentity):
+    estimated_rows: int | None = Field(default=None, ge=0)
+    estimated_bytes: int | None = Field(default=None, ge=0)
+
+
+class LoadManualPromptIn(LoadPlanRecommendationIn):
+    pool_slots: int = Field(default=2, ge=1, le=32)
+    max_parallelism_allowed: int = Field(default=32, ge=1, le=32)
+
+
+class LoadManualValidateIn(LoadPlanRecommendationIn):
+    response_text: str = Field(min_length=1, max_length=100000)
+    pool_slots: int = Field(default=2, ge=1, le=32)
+    max_parallelism_allowed: int = Field(default=32, ge=1, le=32)
+
+
+class LoadPlanIn(BaseModel):
+    system_cd: str = Field(min_length=1, max_length=32)
+    instance_name: str = Field(min_length=1, max_length=255)
+    postfix: str = Field(default="", max_length=32)
+    owner: str = Field(min_length=1, max_length=255)
+    table_name: str = Field(min_length=1, max_length=255)
+    table_type: str = Field(default="TABLE", max_length=20)
+    load_mode: Literal["INIT", "INCREMENTAL"] = "INIT"
+    split_strategy: Literal["SINGLE", "SOURCE_PARTITION", "DATE_RANGE", "PK_RANGE", "COMPOSITE"] = "SINGLE"
+    estimated_rows: int | None = Field(default=None, ge=0)
+    estimated_bytes: int | None = Field(default=None, ge=0)
+    target_chunk_rows: int = Field(default=1000000, ge=1, le=100000000)
+    max_parallelism: int = Field(default=1, ge=1, le=32)
+    source_pool: str | None = Field(default=None, max_length=120)
+    allowed_window: str | None = Field(default=None, max_length=120)
+    source_watermark: str | None = Field(default=None, max_length=255)
+
+
+class LoadChunkStatusIn(BaseModel):
+    status: Literal["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "SKIPPED"]
+    source_rows: int | None = Field(default=None, ge=0)
+    staging_rows: int | None = Field(default=None, ge=0)
+    error_message: str | None = Field(default=None, max_length=4000)
+    validation_status: str | None = Field(default=None, max_length=30)
+
+
 class PkCandidate(StrictSchema):
     candidate_id: int | None = None
     rank: int = Field(ge=1, le=4)

@@ -89,6 +89,61 @@ class DatalakeTarget(TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class DatalakeLoadPlan(TimestampMixin, Base):
+    __tablename__ = "datalake_load_plans"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    system_cd: Mapped[str] = mapped_column(String(32), index=True)
+    instance_name: Mapped[str] = mapped_column(String(255), index=True)
+    postfix: Mapped[str] = mapped_column(String(32), default="")
+    owner: Mapped[str] = mapped_column(String(255), index=True)
+    table_name: Mapped[str] = mapped_column(String(255), index=True)
+    table_type: Mapped[str] = mapped_column(String(20), default="TABLE")
+    load_mode: Mapped[str] = mapped_column(String(20), default="INIT")
+    split_strategy: Mapped[str] = mapped_column(String(30), default="SINGLE")
+    estimated_rows: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    estimated_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    target_chunk_rows: Mapped[int] = mapped_column(BigInteger, default=1000000)
+    max_parallelism: Mapped[int] = mapped_column(Integer, default=1)
+    source_pool: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    allowed_window: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    source_watermark: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    plan_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", index=True)
+    initial_status: Mapped[str] = mapped_column(String(30), default="NOT_READY")
+    incremental_status: Mapped[str] = mapped_column(String(30), default="LOCKED")
+    dag_manifest_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class DatalakeLoadChunk(TimestampMixin, Base):
+    __tablename__ = "datalake_load_chunks"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("datalake_load_plans.id", ondelete="CASCADE"), index=True)
+    chunk_no: Mapped[int] = mapped_column(Integer)
+    range_start: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    range_end: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    expected_rows: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_rows: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    staging_rows: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    validation_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    checkpoint_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DatalakeLoadDag(TimestampMixin, Base):
+    __tablename__ = "datalake_load_dags"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("datalake_load_plans.id", ondelete="CASCADE"), index=True)
+    dag_type: Mapped[str] = mapped_column(String(20))
+    dag_id: Mapped[str] = mapped_column(String(180), unique=True)
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT")
+    schedule: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    manifest_json: Mapped[str] = mapped_column(Text)
+    deployed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class DataSource(TimestampMixin, Base):
     __tablename__ = "data_sources"
     id: Mapped[int] = mapped_column(primary_key=True)

@@ -23,19 +23,22 @@ from .dependencies import current_user, require
 from .excel_export import build_schema_workbook, build_sources_workbook
 from .integration import ensure_integration_views, snapshot_diff, snapshot_summary
 from .datalake import datalake_root
-from .datalake_ddl import build_table_spec, render_postgresql_ddl, render_postgresql_procedure_scripts
+from .datalake_ddl import build_table_spec, render_postgresql_ddl, render_postgresql_procedure_scripts, table_spec_fingerprint
 from .datalake_query import DatalakeTableNotFound, list_l0_tables, preview_l0_table
 from .datalake_postgres import apply_postgresql_ddl, explain_postgresql_error, inspect_postgresql_objects
 from .load_service import run_full_load
-from .models import CollectionJob, CollectionRun, DataSource, DatalakeTarget, Menu, MetaColumnExt, MetaLayoutChange, MetaLayoutChangeAction, MetaPkCandidate, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User
+from .load_operations import build_chunks, build_manifest, normalize_plan_input, plan_fingerprint, recommend_load_design
+from .airflow_control import prepare_source_runtime
+from .models import CollectionJob, CollectionRun, DataSource, DatalakeTarget, DatalakeLoadPlan, DatalakeLoadChunk, DatalakeLoadDag, Menu, MetaColumnExt, MetaLayoutChange, MetaLayoutChangeAction, MetaPkCandidate, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User, utcnow
 from .ai_description import recommend_date_columns, suggest_descriptions, suggest_table_description
 from .manual_ai import build_manual_prompt, validate_manual_response
+from .load_manual_ai import build_load_prompt, validate_load_response
 from .capabilities import assert_supported_db_type
 from .collector import available_schema_names, normalize_collection_items, source_engine, test_source
 from .catalog.collection_permissions import check_collection_catalog_permissions
 from .catalog.oracle import OracleCatalogProvider
 from .scheduler import enqueue_run, request_run_cancel, start_scheduler, stop_scheduler, sync_jobs
-from .schemas import DataSourceIn, DataSourceOut, DatalakeTargetConnectionIn, DatalakeTargetOut, DatalakeTargetReplaceIn, DateColumnRecommendationIn, DescriptionPreviewIn, FullLoadIn, JobIn, JobOut, LoginRequest, LoginResponse, ManualAiApplyIn, ManualAiPromptIn, ManualAiResponseIn, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut, PkCandidatesGenerateIn, PkCandidatesListResponse, PkCandidatesGenerateResponse, PkCandidateApplyIn, PkCandidateApplyResponse, PkCandidateValidateResponse, PkCandidateRejectIn, RegisteredTableIdentity, RegisteredProcedureApplyIn
+from .schemas import DataSourceIn, DataSourceOut, DatalakeTargetConnectionIn, DatalakeTargetOut, DatalakeTargetReplaceIn, DateColumnRecommendationIn, DescriptionPreviewIn, FullLoadIn, JobIn, JobOut, LoginRequest, LoginResponse, ManualAiApplyIn, ManualAiPromptIn, ManualAiResponseIn, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut, PkCandidatesGenerateIn, PkCandidatesListResponse, PkCandidatesGenerateResponse, PkCandidateValidateResponse, PkCandidateApplyIn, PkCandidateApplyResponse, PkCandidateRejectIn, RegisteredTableIdentity, RegisteredProcedureApplyIn, RegisteredDatalakePlanApplyIn, LoadPlanRecommendationIn, LoadManualPromptIn, LoadManualValidateIn, LoadPlanIn, LoadChunkStatusIn, SourceRuntimePrepareIn
 from .security import create_token, decode_token, decrypt_json, encrypt_json, hash_password, verify_password
 from .datalake_target_service import create_target, load_active_connection, replace_target, retest_target, sync_meta_target_database_from_active_target, target_status, test_target_connection
 from .seed import seed
@@ -952,6 +955,169 @@ def full_load(payload: FullLoadIn, session: Session = Depends(get_session), _: U
         raise HTTPException(502, f"Full Load에 실패했습니다: {str(exc)[:500]}") from exc
 
 
+@app.post("/api/datalake-load/recommend")
+def recommend_datalake_load_plan(payload: LoadPlanRecommendationIn, session: Session = Depends(get_session), _: User = Depends(require("jobs:write"))):
+    identity = payload.model_dump(exclude={"estimated_rows", "estimated_bytes"})
+    table = session.scalar(select(MetaTableExt).where(MetaTableExt.system_cd == identity["system_cd"], MetaTableExt.instance_name == identity["instance_name"], MetaTableExt.postfix == identity["postfix"], MetaTableExt.owner == identity["owner"], MetaTableExt.table_name == identity["table_name"]))
+    if not table:
+        raise HTTPException(404, "등록 메타에서 적재 대상 테이블을 찾을 수 없습니다.")
+    columns = session.scalars(select(MetaColumnExt).where(MetaColumnExt.system_cd == table.system_cd, MetaColumnExt.instance_name == table.instance_name, MetaColumnExt.postfix == table.postfix, MetaColumnExt.owner == table.owner, MetaColumnExt.table_name == table.table_name).order_by(MetaColumnExt.column_id)).all()
+    column_payload = [{"column_name": column.column_name, "data_type": column.data_type, "pk_yn": column.pk_yn, "partition_key_yn": column.partition_key_yn, "update_base_yn": column.update_base_yn, "null_yn": column.null_yn} for column in columns]
+    config = session.get(MetaTableConfig, 1)
+    provider = config.description_ai_provider if config and config.description_ai_enabled else "rules"
+    model = config.description_ai_model if config else "qwen3:latest"
+    date_result = recommend_date_columns(table.table_name, column_payload, provider, model)
+    recommendation = recommend_load_design(column_payload, payload.estimated_rows, payload.estimated_bytes, date_result)
+    recommendation["method"] = "local-ollama+rules" if date_result.get("method") == "local-ollama" else "offline-rules"
+    recommendation["ai_provider"] = provider
+    recommendation["date_recommendation"] = date_result
+    return {"identity": identity, "recommendation": recommendation}
+
+
+def _load_manual_metadata(payload: LoadManualPromptIn | LoadManualValidateIn, session: Session) -> dict[str, Any]:
+    table = session.scalar(select(MetaTableExt).where(MetaTableExt.system_cd == payload.system_cd, MetaTableExt.instance_name == payload.instance_name, MetaTableExt.postfix == payload.postfix, MetaTableExt.owner == payload.owner, MetaTableExt.table_name == payload.table_name))
+    if not table:
+        raise HTTPException(404, "등록 메타에서 적재 대상 테이블을 찾을 수 없습니다.")
+    columns = session.scalars(select(MetaColumnExt).where(MetaColumnExt.system_cd == table.system_cd, MetaColumnExt.instance_name == table.instance_name, MetaColumnExt.postfix == table.postfix, MetaColumnExt.owner == table.owner, MetaColumnExt.table_name == table.table_name).order_by(MetaColumnExt.column_id)).all()
+    return {
+        "system_cd": table.system_cd,
+        "instance_name": table.instance_name,
+        "postfix": table.postfix or "",
+        "owner": table.owner,
+        "table_name": table.table_name,
+        "db_type": getattr(table, "db_type", None) or "UNKNOWN",
+        "estimated_rows": payload.estimated_rows,
+        "estimated_bytes": payload.estimated_bytes,
+        "pool_slots": payload.pool_slots,
+        "max_parallelism_allowed": payload.max_parallelism_allowed,
+        "columns": [{"column_name": column.column_name, "data_type": column.data_type, "pk_yn": column.pk_yn, "partition_key_yn": column.partition_key_yn, "update_base_yn": column.update_base_yn, "null_yn": column.null_yn} for column in columns],
+    }
+
+
+@app.post("/api/datalake-load/recommend/manual-prompt")
+def create_load_manual_prompt(payload: LoadManualPromptIn, session: Session = Depends(get_session), _: User = Depends(require("jobs:write"))):
+    metadata = _load_manual_metadata(payload, session)
+    return build_load_prompt(metadata, get_settings().secret_key) | {"input_summary": {"table": f"{metadata['owner']}.{metadata['table_name']}", "column_count": len(metadata["columns"]), "estimated_rows": metadata["estimated_rows"]}}
+
+
+@app.post("/api/datalake-load/recommend/manual-validate")
+def validate_load_manual_response(payload: LoadManualValidateIn, session: Session = Depends(get_session), _: User = Depends(require("jobs:write"))):
+    metadata = _load_manual_metadata(payload, session)
+    try:
+        return validate_load_response(payload.response_text, metadata, get_settings().secret_key)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+
+
+@app.post("/api/datalake-load/source-runtime/prepare")
+def prepare_datalake_source_runtime(payload: SourceRuntimePrepareIn, session: Session = Depends(get_session), _: User = Depends(require("jobs:write"))):
+    identity = payload.model_dump(exclude={"pool_slots", "confirm_pool_resize", "credential_mode", "dedicated_username", "dedicated_password"})
+    table = session.scalar(select(MetaTableExt).where(MetaTableExt.system_cd == payload.system_cd, MetaTableExt.instance_name == payload.instance_name, MetaTableExt.postfix == payload.postfix, MetaTableExt.owner == payload.owner, MetaTableExt.table_name == payload.table_name))
+    if not table:
+        raise HTTPException(404, "적재 대상 메타 테이블을 찾을 수 없습니다.")
+    source = session.get(DataSource, table.src_data_source_id) if table.src_data_source_id else session.scalar(select(DataSource).where(or_(DataSource.name == table.instance_name, DataSource.name == table.etl_conn_nm)).order_by(DataSource.id.desc()))
+    if not source:
+        raise HTTPException(404, "등록된 원천 DB 접속정보를 찾을 수 없습니다.")
+    result = prepare_source_runtime(source=source, credential_mode=payload.credential_mode, dedicated_username=payload.dedicated_username, dedicated_password=payload.dedicated_password, pool_slots=payload.pool_slots, confirm_pool_resize=payload.confirm_pool_resize)
+    result["source_name"] = source.name
+    result["identity"] = identity
+    return result
+
+
+@app.get("/api/datalake-load/plans")
+def list_datalake_load_plans(session: Session = Depends(get_session), _: User = Depends(require("jobs:read"))):
+    plans = session.scalars(select(DatalakeLoadPlan).order_by(DatalakeLoadPlan.updated_at.desc())).all()
+    return [{"id": p.id, "system_cd": p.system_cd, "instance_name": p.instance_name, "postfix": p.postfix, "owner": p.owner, "table_name": p.table_name, "table_type": p.table_type, "load_mode": p.load_mode, "split_strategy": p.split_strategy, "estimated_rows": p.estimated_rows, "estimated_bytes": p.estimated_bytes, "target_chunk_rows": p.target_chunk_rows, "max_parallelism": p.max_parallelism, "status": p.status, "initial_status": p.initial_status, "incremental_status": p.incremental_status, "plan_fingerprint": p.plan_fingerprint, "updated_at": p.updated_at} for p in plans]
+
+
+@app.post("/api/datalake-load/plans", status_code=201)
+def create_datalake_load_plan(payload: LoadPlanIn, session: Session = Depends(get_session), actor: User = Depends(require("jobs:write"))):
+    try:
+        normalized = normalize_plan_input(payload.model_dump())
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    registered = session.scalar(select(MetaTableExt).where(MetaTableExt.system_cd == normalized.system_cd, MetaTableExt.instance_name == normalized.instance_name, MetaTableExt.postfix == normalized.postfix, MetaTableExt.owner == normalized.owner, MetaTableExt.table_name == normalized.table_name))
+    if not registered:
+        raise HTTPException(404, "등록 메타에서 적재 대상 테이블을 찾을 수 없습니다.")
+    fingerprint = plan_fingerprint(normalized)
+    existing = session.scalar(select(DatalakeLoadPlan).where(DatalakeLoadPlan.plan_fingerprint == fingerprint))
+    if existing:
+        return {"id": existing.id, "status": "EXISTING", "plan_fingerprint": fingerprint}
+    chunks = build_chunks(normalized)
+    plan = DatalakeLoadPlan(**normalized.__dict__, plan_fingerprint=fingerprint, status="READY", initial_status="PLANNED" if normalized.load_mode == "INIT" else "COMPLETED", incremental_status="LOCKED", created_by=actor.email)
+    session.add(plan)
+    session.flush()
+    for item in chunks:
+        session.add(DatalakeLoadChunk(plan_id=plan.id, **item))
+    manifest = build_manifest(normalized, chunks)
+    plan.dag_manifest_json = json.dumps(manifest, ensure_ascii=False)
+    session.commit()
+    return {"id": plan.id, "status": plan.status, "plan_fingerprint": fingerprint, "chunk_count": len(chunks), "manifest": manifest}
+
+
+@app.get("/api/datalake-load/plans/{plan_id}")
+def get_datalake_load_plan(plan_id: int, session: Session = Depends(get_session), _: User = Depends(require("jobs:read"))):
+    plan = session.get(DatalakeLoadPlan, plan_id)
+    if not plan:
+        raise HTTPException(404, "적재 계획을 찾을 수 없습니다.")
+    chunks = session.scalars(select(DatalakeLoadChunk).where(DatalakeLoadChunk.plan_id == plan.id).order_by(DatalakeLoadChunk.chunk_no)).all()
+    dags = session.scalars(select(DatalakeLoadDag).where(DatalakeLoadDag.plan_id == plan.id).order_by(DatalakeLoadDag.dag_type)).all()
+    return {"plan": {"id": plan.id, "system_cd": plan.system_cd, "instance_name": plan.instance_name, "postfix": plan.postfix, "owner": plan.owner, "table_name": plan.table_name, "table_type": plan.table_type, "load_mode": plan.load_mode, "split_strategy": plan.split_strategy, "estimated_rows": plan.estimated_rows, "estimated_bytes": plan.estimated_bytes, "target_chunk_rows": plan.target_chunk_rows, "max_parallelism": plan.max_parallelism, "source_pool": plan.source_pool, "allowed_window": plan.allowed_window, "source_watermark": plan.source_watermark, "plan_fingerprint": plan.plan_fingerprint, "status": plan.status, "initial_status": plan.initial_status, "incremental_status": plan.incremental_status}, "chunks": [{"id": c.id, "chunk_no": c.chunk_no, "range_start": c.range_start, "range_end": c.range_end, "expected_rows": c.expected_rows, "source_rows": c.source_rows, "staging_rows": c.staging_rows, "retry_count": c.retry_count, "status": c.status, "error_message": c.error_message, "validation_status": c.validation_status, "checkpoint_at": c.checkpoint_at} for c in chunks], "dags": [{"id": d.id, "dag_type": d.dag_type, "dag_id": d.dag_id, "status": d.status, "schedule": d.schedule, "manifest": json.loads(d.manifest_json)} for d in dags]}
+
+
+@app.patch("/api/datalake-load/plans/{plan_id}/chunks/{chunk_id}")
+def update_datalake_load_chunk(plan_id: int, chunk_id: int, payload: LoadChunkStatusIn, session: Session = Depends(get_session), _: User = Depends(require("jobs:write"))):
+    chunk = session.scalar(select(DatalakeLoadChunk).where(DatalakeLoadChunk.id == chunk_id, DatalakeLoadChunk.plan_id == plan_id))
+    if not chunk:
+        raise HTTPException(404, "적재 Chunk를 찾을 수 없습니다.")
+    chunk.status = payload.status
+    chunk.source_rows = payload.source_rows
+    chunk.staging_rows = payload.staging_rows
+    chunk.error_message = payload.error_message
+    chunk.validation_status = payload.validation_status
+    if payload.status == "SUCCEEDED":
+        chunk.checkpoint_at = utcnow()
+    plan = session.get(DatalakeLoadPlan, plan_id)
+    if plan and plan.load_mode == "INIT":
+        statuses = list(session.scalars(select(DatalakeLoadChunk.status).where(DatalakeLoadChunk.plan_id == plan_id)).all())
+        if statuses and all(item == "SUCCEEDED" for item in statuses):
+            plan.initial_status = "COMPLETED"
+            plan.incremental_status = "READY"
+    session.commit()
+    return {"id": chunk.id, "status": chunk.status, "initial_status": plan.initial_status if plan else None, "incremental_status": plan.incremental_status if plan else None}
+
+
+@app.post("/api/datalake-load/plans/{plan_id}/dags")
+def create_datalake_load_dags(plan_id: int, session: Session = Depends(get_session), actor: User = Depends(require("jobs:write"))):
+    plan = session.get(DatalakeLoadPlan, plan_id)
+    if not plan:
+        raise HTTPException(404, "적재 계획을 찾을 수 없습니다.")
+    chunks = session.scalars(select(DatalakeLoadChunk).where(DatalakeLoadChunk.plan_id == plan_id).order_by(DatalakeLoadChunk.chunk_no)).all()
+    normalized = normalize_plan_input({"system_cd": plan.system_cd, "instance_name": plan.instance_name, "postfix": plan.postfix, "owner": plan.owner, "table_name": plan.table_name, "table_type": plan.table_type, "load_mode": plan.load_mode, "split_strategy": plan.split_strategy, "estimated_rows": plan.estimated_rows, "estimated_bytes": plan.estimated_bytes, "target_chunk_rows": plan.target_chunk_rows, "max_parallelism": plan.max_parallelism, "source_pool": plan.source_pool, "allowed_window": plan.allowed_window, "source_watermark": plan.source_watermark})
+    created = []
+    for dag_type in ("INIT", "INCREMENTAL"):
+        if dag_type == "INCREMENTAL" and plan.incremental_status != "READY":
+            continue
+        dag_plan = normalize_plan_input({**normalized.__dict__, "load_mode": dag_type})
+        manifest = build_manifest(dag_plan, [{"chunk_no": c.chunk_no, "range_start": c.range_start, "range_end": c.range_end, "expected_rows": c.expected_rows, "status": c.status} for c in chunks])
+        dag_id = manifest["dag_id"]
+        dag = session.scalar(select(DatalakeLoadDag).where(DatalakeLoadDag.dag_id == dag_id))
+        if not dag:
+            dag = DatalakeLoadDag(plan_id=plan_id, dag_type=dag_type, dag_id=dag_id, status="DRAFT", schedule=manifest["schedule"], manifest_json=json.dumps(manifest, ensure_ascii=False))
+            session.add(dag)
+        created.append({"dag_id": dag_id, "dag_type": dag_type, "status": dag.status, "manifest": manifest})
+    session.commit()
+    return {"plan_id": plan_id, "dags": created, "actor": actor.email}
+
+
+@app.get("/api/datalake-load/plans/{plan_id}/manifest/{dag_type}")
+def download_datalake_load_manifest(plan_id: int, dag_type: str, session: Session = Depends(get_session), _: User = Depends(require("jobs:read"))):
+    dag = session.scalar(select(DatalakeLoadDag).where(DatalakeLoadDag.plan_id == plan_id, DatalakeLoadDag.dag_type == dag_type.upper()))
+    if not dag:
+        raise HTTPException(404, "해당 DAG manifest를 찾을 수 없습니다.")
+    return json.loads(dag.manifest_json)
+
+
 @app.get("/api/datalake/tables")
 def list_datalake_tables(_: User = Depends(require("jobs:read"))):
     return {"tables": list_l0_tables(datalake_root())}
@@ -1762,6 +1928,10 @@ def _registered_table_spec(session: Session, identity: RegisteredTableIdentity):
     return build_table_spec(metadata)
 
 
+def needs_full_snapshot_ack(spec) -> bool:
+    return spec.strategy == "TRUNCATE_INSERT" and not spec.pk_columns and not spec.update_base_columns and not spec.partition_column
+
+
 @app.post("/api/metadata/registered/datalake-plan")
 def create_datalake_plan(identity: RegisteredTableIdentity, session: Session = Depends(get_session), _: User = Depends(require("metadata:read"))):
     config = session.get(MetaTableConfig, 1)
@@ -1778,8 +1948,9 @@ def create_datalake_plan(identity: RegisteredTableIdentity, session: Session = D
         raise
     except ValueError as error:
         return {"status": "BLOCKED", "strategy": "MANUAL_REQUIRED", "blocking_reasons": [str(error)], "ddl": None, "procedure_scripts": {}}
-    fingerprint = hashlib.sha256(ddl.encode("utf-8")).hexdigest()
-    return {"status": "READY", "engine": "postgresql", "strategy": spec.strategy, "st_schema": spec.st_schema, "st_table": spec.st_table, "l0_schema": spec.l0_schema, "l0_table": spec.l0_table, "procedure_name": spec.procedure_name, "pk_columns": list(spec.pk_columns), "partition_column": spec.partition_column, "update_base_columns": list(spec.update_base_columns), "recommended_reason": scripts.get(spec.strategy if spec.strategy != "PERIOD_REPLACE" else "DELETE_INSERT", {}).get("reason", ""), "fingerprint": fingerprint, "ddl": ddl, "procedure_scripts": scripts}
+    spec_fingerprint = table_spec_fingerprint(spec)
+    ddl_fingerprint = hashlib.sha256(ddl.encode("utf-8")).hexdigest()
+    return {"status": "READY", "engine": "postgresql", "strategy": spec.strategy, "st_schema": spec.st_schema, "st_table": spec.st_table, "l0_schema": spec.l0_schema, "l0_table": spec.l0_table, "procedure_name": spec.procedure_name, "pk_columns": list(spec.pk_columns), "partition_column": spec.partition_column, "update_base_columns": list(spec.update_base_columns), "recommended_reason": scripts.get(spec.strategy if spec.strategy != "PERIOD_REPLACE" else "DELETE_INSERT", {}).get("reason", ""), "spec_fingerprint": spec_fingerprint, "fingerprint": ddl_fingerprint, "ddl_fingerprint": ddl_fingerprint, "ddl": ddl, "procedure_scripts": scripts}
 
 
 @app.post("/api/metadata/registered/datalake-status")
@@ -1871,7 +2042,7 @@ def apply_registered_datalake_procedure(payload: RegisteredProcedureApplyIn, str
 
 
 @app.post("/api/metadata/registered/datalake-plan/apply")
-def apply_datalake_plan(identity: RegisteredTableIdentity, confirm: bool = Query(False), session: Session = Depends(get_session), actor: User = Depends(require("metadata:write"))):
+def apply_datalake_plan(payload: RegisteredDatalakePlanApplyIn, confirm: bool = Query(False), session: Session = Depends(get_session), actor: User = Depends(require("metadata:write"))):
     if not confirm:
         raise HTTPException(400, "ST/L0 생성 적용은 confirm=true 확인이 필요합니다.")
     target = target_status(session)
@@ -1879,8 +2050,16 @@ def apply_datalake_plan(identity: RegisteredTableIdentity, confirm: bool = Query
         raise HTTPException(409, "현재는 PostgreSQL Datalake Target에만 ST/L0 생성을 적용할 수 있습니다.")
     spec = None
     try:
-        spec = _registered_table_spec(session, identity)
+        spec = _registered_table_spec(session, payload)
+        current_spec_fingerprint = table_spec_fingerprint(spec)
+        if current_spec_fingerprint != payload.spec_fingerprint:
+            raise HTTPException(409, "PLAN_STALE: 저장된 메타가 계획 생성 후 변경되었습니다. 최신 계획을 다시 확인하세요.")
         ddl = render_postgresql_ddl(spec)
+        ddl_fingerprint = hashlib.sha256(ddl.encode("utf-8")).hexdigest()
+        if payload.ddl_fingerprint and ddl_fingerprint != payload.ddl_fingerprint:
+            raise HTTPException(409, "PLAN_STALE: 생성 DDL이 계획과 일치하지 않습니다. 최신 계획을 다시 확인하세요.")
+        if needs_full_snapshot_ack(spec) and "FULL_SNAPSHOT_CONFIRMED" not in payload.acknowledgements:
+            raise HTTPException(422, "ACKNOWLEDGEMENT_REQUIRED: 전체 스냅샷 방식 확인이 필요합니다.")
         result = apply_postgresql_ddl(ddl)
     except HTTPException:
         raise
