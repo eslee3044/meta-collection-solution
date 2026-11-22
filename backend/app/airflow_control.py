@@ -82,6 +82,25 @@ def preflight() -> dict[str, Any]:
 
 
 
+def trigger_dag(dag_id: str, *, conf: dict[str, Any] | None = None, run_id: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"conf": conf or {}}
+    if run_id:
+        payload["dag_run_id"] = run_id
+    status, response = _request("POST", f"dags/{dag_id}/dagRuns", payload)
+    if status not in {200, 201} or not response:
+        raise HTTPException(status_code=502, detail="Airflow DAG 실행 요청에 실패했습니다.")
+    return {"dag_id": dag_id, "dag_run_id": response.get("dag_run_id"), "state": response.get("state", "queued"), "execution_date": response.get("execution_date")}
+
+
+def list_dag_runs(dag_id: str, *, limit: int = 5) -> list[dict[str, Any]]:
+    status, response = _request("GET", f"dags/{dag_id}/dagRuns?limit={max(1, min(limit, 20))}&order_by=-execution_date")
+    if status == 404:
+        return []
+    if status != 200 or not response:
+        raise HTTPException(status_code=502, detail="Airflow DAG 실행 상태를 조회하지 못했습니다.")
+    return response.get("dag_runs", [])
+
+
 def prepare_source_runtime(*, source: Any, credential_mode: str, dedicated_username: str | None, dedicated_password: str | None, pool_slots: int, confirm_pool_resize: bool) -> dict[str, Any]:
     from .security import decrypt_json
 

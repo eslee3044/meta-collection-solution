@@ -29,7 +29,7 @@ from .datalake_query import DatalakeTableNotFound, list_l0_tables, preview_l0_ta
 from .datalake_postgres import apply_postgresql_ddl, explain_postgresql_error, inspect_postgresql_objects
 from .load_service import run_full_load
 from .load_operations import build_chunks, build_manifest, normalize_plan_input, plan_fingerprint, recommend_load_design
-from .airflow_control import prepare_source_runtime, preflight as airflow_preflight
+from .airflow_control import list_dag_runs, prepare_source_runtime, preflight as airflow_preflight, trigger_dag
 from .orchestration_mode import validate_mode_change
 from .airflow_dag_factory import render_dag_source
 from .models import CollectionJob, CollectionRun, DataSource, DatalakeTarget, DatalakeOrchestrationConfig, DatalakeLoadPlan, DatalakeLoadChunk, DatalakeLoadDag, Menu, MetaColumnExt, MetaLayoutChange, MetaLayoutChangeAction, MetaPkCandidate, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User, utcnow
@@ -1211,6 +1211,34 @@ def get_datalake_load_deployment(plan_id: int, session: Session = Depends(get_se
         raise HTTPException(status_code=404, detail="적재 계획을 찾을 수 없습니다.")
     dags = session.scalars(select(DatalakeLoadDag).where(DatalakeLoadDag.plan_id == plan_id).order_by(DatalakeLoadDag.dag_type)).all()
     return {"plan_id": plan_id, "plan_status": plan.status, "dags": [{"dag_id": dag.dag_id, "dag_type": dag.dag_type, "status": dag.status, "deployed_at": dag.deployed_at} for dag in dags]}
+
+
+@app.post("/api/datalake-load/plans/{plan_id}/airflow-run")
+def trigger_datalake_airflow_run(plan_id: int, session: Session = Depends(get_session), actor: User = Depends(require("jobs:write"))):
+    config = _orchestration_config(session)
+    if config.mode != "AIRFLOW_MANAGED":
+        raise HTTPException(status_code=409, detail="Airflow 직접 운영 모드에서만 초기 적재를 실행할 수 있습니다.")
+    plan = session.get(DatalakeLoadPlan, plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="적재 계획을 찾을 수 없습니다.")
+    dag = session.scalar(select(DatalakeLoadDag).where(DatalakeLoadDag.plan_id == plan_id, DatalakeLoadDag.dag_type == "INIT"))
+    if not dag or dag.status != "DEPLOYED":
+        raise HTTPException(status_code=409, detail="먼저 INIT DAG를 Airflow에 배포하세요.")
+    result = trigger_dag(dag.dag_id, conf={"plan_id": plan_id, "requested_by": actor.email})
+    plan.status = "INITIAL_RUNNING"
+    session.commit()
+    return {"plan_id": plan_id, "dag_type": dag.dag_type, **result}
+
+
+@app.get("/api/datalake-load/plans/{plan_id}/airflow-runs")
+def list_datalake_airflow_runs(plan_id: int, session: Session = Depends(get_session), _: User = Depends(require("jobs:read"))):
+    plan = session.get(DatalakeLoadPlan, plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="적재 계획을 찾을 수 없습니다.")
+    dag = session.scalar(select(DatalakeLoadDag).where(DatalakeLoadDag.plan_id == plan_id, DatalakeLoadDag.dag_type == "INIT"))
+    if not dag:
+        return {"plan_id": plan_id, "runs": []}
+    return {"plan_id": plan_id, "dag_id": dag.dag_id, "runs": list_dag_runs(dag.dag_id)}
 
 
 @app.get("/api/datalake-load/plans/{plan_id}/manifest/{dag_type}")
