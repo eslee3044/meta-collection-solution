@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     airflow_api_url: str = "http://localhost:8085/api/v1"
     airflow_username: str | None = None
     airflow_password: str | None = None
+    airflow_dag_deploy_path: str = "/var/lib/metavault/airflow-dags"
 
     model_config = SettingsConfigDict(
         env_file=(Path(__file__).parents[2] / ".env", Path.cwd() / ".env"),

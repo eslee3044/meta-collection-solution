@@ -7,6 +7,7 @@ import secrets
 import hashlib
 import logging
 from urllib.parse import quote
+from pathlib import Path
 from typing import Any
 from types import SimpleNamespace
 import yaml
@@ -28,8 +29,10 @@ from .datalake_query import DatalakeTableNotFound, list_l0_tables, preview_l0_ta
 from .datalake_postgres import apply_postgresql_ddl, explain_postgresql_error, inspect_postgresql_objects
 from .load_service import run_full_load
 from .load_operations import build_chunks, build_manifest, normalize_plan_input, plan_fingerprint, recommend_load_design
-from .airflow_control import prepare_source_runtime
-from .models import CollectionJob, CollectionRun, DataSource, DatalakeTarget, DatalakeLoadPlan, DatalakeLoadChunk, DatalakeLoadDag, Menu, MetaColumnExt, MetaLayoutChange, MetaLayoutChangeAction, MetaPkCandidate, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User, utcnow
+from .airflow_control import prepare_source_runtime, preflight as airflow_preflight
+from .orchestration_mode import validate_mode_change
+from .airflow_dag_factory import render_dag_source
+from .models import CollectionJob, CollectionRun, DataSource, DatalakeTarget, DatalakeOrchestrationConfig, DatalakeLoadPlan, DatalakeLoadChunk, DatalakeLoadDag, Menu, MetaColumnExt, MetaLayoutChange, MetaLayoutChangeAction, MetaPkCandidate, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User, utcnow
 from .ai_description import recommend_date_columns, suggest_descriptions, suggest_table_description
 from .manual_ai import build_manual_prompt, validate_manual_response
 from .load_manual_ai import build_load_prompt, validate_load_response
@@ -38,7 +41,7 @@ from .collector import available_schema_names, normalize_collection_items, sourc
 from .catalog.collection_permissions import check_collection_catalog_permissions
 from .catalog.oracle import OracleCatalogProvider
 from .scheduler import enqueue_run, request_run_cancel, start_scheduler, stop_scheduler, sync_jobs
-from .schemas import DataSourceIn, DataSourceOut, DatalakeTargetConnectionIn, DatalakeTargetOut, DatalakeTargetReplaceIn, DateColumnRecommendationIn, DescriptionPreviewIn, FullLoadIn, JobIn, JobOut, LoginRequest, LoginResponse, ManualAiApplyIn, ManualAiPromptIn, ManualAiResponseIn, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut, PkCandidatesGenerateIn, PkCandidatesListResponse, PkCandidatesGenerateResponse, PkCandidateValidateResponse, PkCandidateApplyIn, PkCandidateApplyResponse, PkCandidateRejectIn, RegisteredTableIdentity, RegisteredProcedureApplyIn, RegisteredDatalakePlanApplyIn, LoadPlanRecommendationIn, LoadManualPromptIn, LoadManualValidateIn, LoadPlanIn, LoadChunkStatusIn, SourceRuntimePrepareIn
+from .schemas import DataSourceIn, DataSourceOut, DatalakeTargetConnectionIn, DatalakeTargetOut, DatalakeTargetReplaceIn, DateColumnRecommendationIn, DescriptionPreviewIn, FullLoadIn, JobIn, JobOut, LoginRequest, LoginResponse, ManualAiApplyIn, ManualAiPromptIn, ManualAiResponseIn, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, DatalakeOrchestrationConfigIn, DatalakeOrchestrationConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut, PkCandidatesGenerateIn, PkCandidatesListResponse, PkCandidatesGenerateResponse, PkCandidateValidateResponse, PkCandidateApplyIn, PkCandidateApplyResponse, PkCandidateRejectIn, RegisteredTableIdentity, RegisteredProcedureApplyIn, RegisteredDatalakePlanApplyIn, LoadPlanRecommendationIn, LoadManualPromptIn, LoadManualValidateIn, LoadPlanIn, LoadChunkStatusIn, SourceRuntimePrepareIn
 from .security import create_token, decode_token, decrypt_json, encrypt_json, hash_password, verify_password
 from .datalake_target_service import create_target, load_active_connection, replace_target, retest_target, sync_meta_target_database_from_active_target, target_status, test_target_connection
 from .seed import seed
@@ -406,6 +409,60 @@ def apply_source(item: DataSource, payload: DataSourceIn) -> None:
             "private_key": payload.ssh_private_key,
             "private_key_passphrase": payload.ssh_private_key_passphrase,
         })
+
+
+def _orchestration_config(session: Session) -> DatalakeOrchestrationConfig:
+    config = session.get(DatalakeOrchestrationConfig, 1)
+    if not config:
+        config = DatalakeOrchestrationConfig(id=1, mode="MANIFEST_ONLY", timezone="Asia/Seoul", incremental_auto_enable=False)
+        session.add(config)
+        session.commit()
+        session.refresh(config)
+    return config
+
+
+def _orchestration_output(config: DatalakeOrchestrationConfig, runtime: dict[str, Any] | None = None) -> DatalakeOrchestrationConfigOut:
+    return DatalakeOrchestrationConfigOut(
+        mode=config.mode,
+        timezone=config.timezone,
+        incremental_auto_enable=config.incremental_auto_enable,
+        runtime=runtime or {},
+        updated_at=config.updated_at,
+        updated_by=config.updated_by,
+    )
+
+
+@app.get("/api/system-settings/datalake-orchestration", response_model=DatalakeOrchestrationConfigOut)
+def get_datalake_orchestration_config(session: Session = Depends(get_session), _: User = Depends(require("admin:*"))):
+    return _orchestration_output(_orchestration_config(session))
+
+
+@app.post("/api/system-settings/datalake-orchestration/preflight")
+def datalake_orchestration_preflight(_: User = Depends(require("admin:*"))):
+    return airflow_preflight()
+
+
+@app.patch("/api/system-settings/datalake-orchestration", response_model=DatalakeOrchestrationConfigOut)
+def update_datalake_orchestration_config(payload: DatalakeOrchestrationConfigIn, session: Session = Depends(get_session), actor: User = Depends(require("admin:*"))):
+    config = _orchestration_config(session)
+    active_runs = session.scalar(select(DatalakeLoadPlan).where(DatalakeLoadPlan.status.in_(["INITIAL_RUNNING", "INCREMENTAL_RUNNING"])).limit(1))
+    active_schedule = session.scalar(select(DatalakeLoadPlan).where(DatalakeLoadPlan.incremental_status == "SCHEDULE_ACTIVE").limit(1)) is not None
+    try:
+        preflight_status = "READY" if payload.mode == "MANIFEST_ONLY" else airflow_preflight().get("status", "FAILED")
+        validate_mode_change(payload.mode, current_mode=config.mode, preflight_status=preflight_status, active_runs=1 if active_runs else 0, active_schedule=active_schedule)
+    except HTTPException:
+        raise
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if payload.expected_updated_at and config.updated_at and payload.expected_updated_at != config.updated_at:
+        raise HTTPException(status_code=409, detail="다른 관리자가 설정을 먼저 변경했습니다. 최신 설정을 다시 불러오세요.")
+    config.mode = payload.mode
+    config.timezone = payload.timezone
+    config.incremental_auto_enable = payload.incremental_auto_enable
+    config.updated_by = actor.email
+    session.commit()
+    session.refresh(config)
+    return _orchestration_output(config)
 
 
 @app.get("/api/meta-table-config", response_model=MetaTableConfigOut)
@@ -1108,6 +1165,52 @@ def create_datalake_load_dags(plan_id: int, session: Session = Depends(get_sessi
         created.append({"dag_id": dag_id, "dag_type": dag_type, "status": dag.status, "manifest": manifest})
     session.commit()
     return {"plan_id": plan_id, "dags": created, "actor": actor.email}
+
+
+@app.post("/api/datalake-load/plans/{plan_id}/deploy")
+def deploy_datalake_load_dags(plan_id: int, session: Session = Depends(get_session), actor: User = Depends(require("jobs:write"))):
+    config = _orchestration_config(session)
+    if config.mode != "AIRFLOW_MANAGED":
+        raise HTTPException(status_code=409, detail="Airflow 직접 운영 모드에서만 DAG를 배포할 수 있습니다.")
+    plan = session.get(DatalakeLoadPlan, plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="적재 계획을 찾을 수 없습니다.")
+    dags = session.scalars(select(DatalakeLoadDag).where(DatalakeLoadDag.plan_id == plan_id)).all()
+    if not dags:
+        raise HTTPException(status_code=409, detail="먼저 INIT/INCREMENTAL DAG manifest를 생성하세요.")
+    deploy_dir = Path(get_settings().airflow_dag_deploy_path)
+    if not deploy_dir.is_dir() or not os.access(deploy_dir, os.W_OK):
+        raise HTTPException(status_code=409, detail="Airflow DAG 배포 경로가 없거나 API 컨테이너에 쓰기 권한이 없습니다.")
+    deployed: list[dict[str, Any]] = []
+    try:
+        for dag in dags:
+            manifest = json.loads(dag.manifest_json)
+            source = render_dag_source(manifest)
+            compile(source, f"<metavault:{dag.dag_id}>", "exec")
+            dag.status = "DEPLOYING"
+            session.flush()
+            target = deploy_dir / f"{dag.dag_id}.py"
+            temporary = deploy_dir / f".{dag.dag_id}.{os.getpid()}.tmp"
+            temporary.write_text(source, encoding="utf-8")
+            os.replace(temporary, target)
+            dag.status = "DEPLOYED"
+            dag.deployed_at = utcnow()
+            deployed.append({"dag_id": dag.dag_id, "dag_type": dag.dag_type, "status": dag.status, "path": str(target)})
+        plan.status = "DEPLOYED"
+        session.commit()
+    except Exception as error:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=f"DAG 생성·배포에 실패했습니다: {error}") from error
+    return {"plan_id": plan_id, "deployed": deployed, "actor": actor.email}
+
+
+@app.get("/api/datalake-load/plans/{plan_id}/deployment")
+def get_datalake_load_deployment(plan_id: int, session: Session = Depends(get_session), _: User = Depends(require("jobs:read"))):
+    plan = session.get(DatalakeLoadPlan, plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="적재 계획을 찾을 수 없습니다.")
+    dags = session.scalars(select(DatalakeLoadDag).where(DatalakeLoadDag.plan_id == plan_id).order_by(DatalakeLoadDag.dag_type)).all()
+    return {"plan_id": plan_id, "plan_status": plan.status, "dags": [{"dag_id": dag.dag_id, "dag_type": dag.dag_type, "status": dag.status, "deployed_at": dag.deployed_at} for dag in dags]}
 
 
 @app.get("/api/datalake-load/plans/{plan_id}/manifest/{dag_type}")

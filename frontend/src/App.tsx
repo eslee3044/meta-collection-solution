@@ -1005,9 +1005,33 @@ function RoleForm({permissions,menus,onClose,onDone}:{permissions:Permission[];m
 
 function MenuForm({onClose,onDone}:{onClose:()=>void;onDone:()=>void}){const[form,setForm]=useState({code:'',label:'',path:'/',icon:'Circle',order:10,parent_id:null});const submit=async(e:FormEvent)=>{e.preventDefault();await api('/api/admin/menus',{method:'POST',body:JSON.stringify(form)});onDone()};return <Modal title="메뉴 추가" subtitle="역할에 배정할 관리 콘솔 메뉴를 등록합니다." onClose={onClose}><form onSubmit={submit}><div className="form-section"><div className="form-grid"><label>메뉴 코드<input required value={form.code} onChange={e=>setForm({...form,code:e.target.value})} placeholder="audit"/></label><label>메뉴명<input required value={form.label} onChange={e=>setForm({...form,label:e.target.value})} placeholder="감사 로그"/></label><label>경로<input required value={form.path} onChange={e=>setForm({...form,path:e.target.value})} placeholder="/audit"/></label><label>정렬 순서<input type="number" value={form.order} onChange={e=>setForm({...form,order:Number(e.target.value)})}/></label></div></div><div className="modal-actions"><button type="button" className="ghost" onClick={onClose}>취소</button><button className="primary">메뉴 저장</button></div></form></Modal>}
 
+function DatalakeOrchestrationPanel({toast}:{toast:(m:string)=>void}){
+  const [config,setConfig]=useState<any|null>(null)
+  const [preflight,setPreflight]=useState<any|null>(null)
+  const [loading,setLoading]=useState(true)
+  const [saving,setSaving]=useState(false)
+  const [checking,setChecking]=useState(false)
+  const load=()=>api<any>('/api/system-settings/datalake-orchestration').then(setConfig).finally(()=>setLoading(false))
+  useEffect(()=>{void load()},[])
+  const check=async()=>{setChecking(true);try{const result=await api<any>('/api/system-settings/datalake-orchestration/preflight',{method:'POST'});setPreflight(result);toast(result.status==='READY'?'Airflow preflight를 통과했습니다.':'Airflow preflight를 통과하지 못했습니다.')}catch(error){toast(error instanceof Error?error.message:'Airflow 상태 확인에 실패했습니다.')}finally{setChecking(false)}}
+  const save=async()=>{if(!config)return;setSaving(true);try{await api('/api/system-settings/datalake-orchestration',{method:'PATCH',body:JSON.stringify({mode:config.mode,timezone:config.timezone,incremental_auto_enable:config.incremental_auto_enable,expected_updated_at:config.updated_at})});toast('Datalake 적재 실행 방식을 저장했습니다.');await load()}catch(error){toast(error instanceof Error?error.message:'설정 저장에 실패했습니다.')}finally{setSaving(false)}}
+  if(loading||!config)return <div className="loading"><RefreshCw className="spin"/>Datalake 적재 실행 설정을 불러오는 중...</div>
+  const runtime=preflight||config.runtime||{}
+  return <div className="orchestration-settings">
+    <div className="admin-settings-section-heading"><div><h2>Datalake 적재 실행</h2><p>Manifest만 생성하는 기존 방식과 Airflow가 DAG·실행·스케줄을 관리하는 방식을 선택합니다.</p></div><Zap size={20}/></div>
+    <div className="orchestration-mode-options">
+      <label className={`orchestration-mode-option ${config.mode==='MANIFEST_ONLY'?'selected':''}`}><input type="radio" name="orchestration-mode" checked={config.mode==='MANIFEST_ONLY'} onChange={()=>setConfig({...config,mode:'MANIFEST_ONLY'})}/><span><b>Manifest 생성·수동 운영</b><small>기존 방식. Manifest를 생성·복사하고 Airflow 실행은 별도로 관리합니다.</small></span></label>
+      <label className={`orchestration-mode-option ${config.mode==='AIRFLOW_MANAGED'?'selected':''}`}><input type="radio" name="orchestration-mode" checked={config.mode==='AIRFLOW_MANAGED'} onChange={()=>setConfig({...config,mode:'AIRFLOW_MANAGED'})}/><span><b>Airflow 직접 운영</b><small>DAG 생성·배포, 초기 적재 실행, 증분 스케줄을 MetaVault에서 관리합니다.</small></span></label>
+    </div>
+    <div className="orchestration-settings-grid"><label>시간대<select value={config.timezone} onChange={event=>setConfig({...config,timezone:event.target.value})}><option value="Asia/Seoul">Asia/Seoul</option><option value="UTC">UTC</option></select></label><label className="checkbox-row"><input type="checkbox" checked={Boolean(config.incremental_auto_enable)} onChange={event=>setConfig({...config,incremental_auto_enable:event.target.checked})}/> 초기 적재 성공 후 증분 스케줄 활성화 허용</label></div>
+    <section className="panel orchestration-preflight"><div className="panel-head"><div><h3>Airflow 운영 상태</h3><p>Airflow 직접 운영을 선택하기 전에 연결·Scheduler·DAG 배포 경로를 확인하세요.</p></div><button className="ghost" onClick={check} disabled={checking}>{checking&&<RefreshCw className="spin" size={15}/>}상태 확인</button></div>{preflight?<div className="orchestration-checks">{preflight.checks?.map((item:any)=><div key={item.code} className={item.status==='PASS'?'pass':'fail'}><span>{item.status==='PASS'?'정상':'확인 필요'}</span><b>{item.code}</b><small>{item.message}</small></div>)}</div>:<div className="empty-state">아직 Airflow 상태를 확인하지 않았습니다.</div>}</section>
+    <div className="form-actions"><button className="primary" onClick={save} disabled={saving}>{saving&&<RefreshCw className="spin" size={15}/>}설정 저장</button></div>
+  </div>
+}
+
 function AdminSettingsPage({toast,isAdmin}:{toast:(m:string)=>void;isAdmin:boolean}){
   const sources=useLoad<Source[]>('/api/sources',[],[])
-  const [section,setSection]=useState<'metadata'|'datalake'>('metadata')
+  const [section,setSection]=useState<'metadata'|'datalake'|'orchestration'>('metadata')
   return <>
     <PageHead eyebrow="ADMINISTRATION" title="시스템 관리" description="MetaVault의 메타 테이블과 Datalake 적재 대상 설정을 관리합니다."/>
     {!isAdmin?<section className="panel"><div className="alert">시스템 관리 권한이 필요합니다.</div></section>:<div className="admin-settings-layout">
@@ -1015,9 +1039,10 @@ function AdminSettingsPage({toast,isAdmin}:{toast:(m:string)=>void;isAdmin:boole
         <h3>설정 메뉴</h3>
         <button type="button" className={section==='metadata'?'selected':''} aria-current={section==='metadata'?'page':undefined} onClick={()=>setSection('metadata')}><TableProperties size={17}/>메타 테이블 설정</button>
         <button type="button" className={section==='datalake'?'selected':''} aria-current={section==='datalake'?'page':undefined} onClick={()=>setSection('datalake')}><Database size={17}/>Datalake 대상 DB</button>
+        <button type="button" className={section==='orchestration'?'selected':''} aria-current={section==='orchestration'?'page':undefined} onClick={()=>setSection('orchestration')}><Zap size={17}/>Datalake 적재 실행</button>
       </aside>
       <section className="panel admin-settings-main system-settings-panel">
-        {section==='metadata'?<MetaTableConfigPanel sources={sources.data} toast={toast} open inline onClose={()=>{}}/>:<DatalakeTargetPage toast={toast} isAdmin={isAdmin}/>}
+        {section==='metadata'?<MetaTableConfigPanel sources={sources.data} toast={toast} open inline onClose={()=>{}}/>:section==='datalake'?<DatalakeTargetPage toast={toast} isAdmin={isAdmin}/>:<DatalakeOrchestrationPanel toast={toast}/>}
       </section>
     </div>}
   </>

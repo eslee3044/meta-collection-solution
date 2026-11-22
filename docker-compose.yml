@@ -47,6 +47,7 @@ services:
     volumes:
       - ./sample:/app/sample:ro
       - ./datalake:/var/lib/metavault/datalake
+      - ./airflow/dags:/var/lib/metavault/airflow-dags
     ports:
       - "8000:8000"
     healthcheck:

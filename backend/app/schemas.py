@@ -267,6 +267,22 @@ class DatalakeTargetOut(BaseModel):
     updated_at: datetime | None = None
 
 
+class DatalakeOrchestrationConfigIn(BaseModel):
+    mode: Literal["MANIFEST_ONLY", "AIRFLOW_MANAGED"] = "MANIFEST_ONLY"
+    timezone: str = Field(default="Asia/Seoul", min_length=1, max_length=80)
+    incremental_auto_enable: bool = False
+    expected_updated_at: datetime | None = None
+
+
+class DatalakeOrchestrationConfigOut(BaseModel):
+    mode: Literal["MANIFEST_ONLY", "AIRFLOW_MANAGED"]
+    timezone: str
+    incremental_auto_enable: bool
+    runtime: dict[str, Any] = Field(default_factory=dict)
+    updated_at: datetime | None = None
+    updated_by: str | None = None
+
+
 class MetaTableConfigIn(BaseModel):
     source_type: Literal["internal", "external"] = "internal"
     external_source_id: int | None = None

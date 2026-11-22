@@ -89,6 +89,15 @@ class DatalakeTarget(TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class DatalakeOrchestrationConfig(TimestampMixin, Base):
+    __tablename__ = "datalake_orchestration_config"
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    mode: Mapped[str] = mapped_column(String(30), default="MANIFEST_ONLY")
+    timezone: Mapped[str] = mapped_column(String(80), default="Asia/Seoul")
+    incremental_auto_enable: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
 class DatalakeLoadPlan(TimestampMixin, Base):
     __tablename__ = "datalake_load_plans"
     id: Mapped[int] = mapped_column(primary_key=True)
