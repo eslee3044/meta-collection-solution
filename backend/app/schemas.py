@@ -1,9 +1,7 @@
 from datetime import datetime
 import json
 from typing import Any, Literal
-from urllib.parse import urlparse
-
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class LoginRequest(BaseModel):
@@ -274,14 +272,6 @@ class DatalakeOrchestrationConfigIn(BaseModel):
     airflow_url: str = Field(default="http://localhost:8085", min_length=1, max_length=500)
     incremental_auto_enable: bool = False
     expected_updated_at: datetime | None = None
-
-    @field_validator("airflow_url")
-    @classmethod
-    def validate_airflow_url(cls, value: str) -> str:
-        parsed = urlparse(value.strip())
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("Airflow 관리자 URL은 http:// 또는 https:// 주소여야 합니다.")
-        return value.strip()
 
 
 class DatalakeOrchestrationConfigOut(BaseModel):

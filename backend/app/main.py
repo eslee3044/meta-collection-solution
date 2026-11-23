@@ -125,10 +125,6 @@ async def lifespan(_: FastAPI):
             "description_ai_provider": "VARCHAR(30) NOT NULL DEFAULT 'rules'",
             "description_ai_model": "VARCHAR(120) NOT NULL DEFAULT 'qwen3:latest'",
         }
-        orchestration_columns = {column["name"] for column in inspect(engine).get_columns("datalake_orchestration_config")}
-        if "airflow_url" not in orchestration_columns:
-            with engine.begin() as connection:
-                connection.execute(text("ALTER TABLE datalake_orchestration_config ADD COLUMN airflow_url VARCHAR(500) NOT NULL DEFAULT 'http://localhost:8085'"))
         config_columns = {column["name"] for column in inspect(engine).get_columns("meta_table_config")}
         for column_name, definition in config_migrations.items():
             if column_name not in config_columns:
@@ -465,6 +461,7 @@ def update_datalake_orchestration_config(payload: DatalakeOrchestrationConfigIn,
         raise HTTPException(status_code=409, detail="다른 관리자가 설정을 먼저 변경했습니다. 최신 설정을 다시 불러오세요.")
     config.mode = payload.mode
     config.timezone = payload.timezone
+    config.airflow_url = payload.airflow_url
     config.incremental_auto_enable = payload.incremental_auto_enable
     config.updated_by = actor.email
     session.commit()

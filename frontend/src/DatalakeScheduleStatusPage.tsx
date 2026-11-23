@@ -23,8 +23,7 @@ export default function DatalakeScheduleStatusPage({ toast }: { toast: (message:
   const load = async (quiet = false) => {
     try {
       const result = await api<any>('/api/datalake-load/schedule-status')
-      setMode(result.mode || 'MANIFEST_ONLY'); setTimezone(result.timezone || 'Asia/Seoul'); setItems(result.items || [])
-      setAirflowUrl(result.airflow_url || 'http://localhost:8085')
+      setMode(result.mode || 'MANIFEST_ONLY'); setTimezone(result.timezone || 'Asia/Seoul'); setAirflowUrl(result.airflow_url || 'http://localhost:8085'); setItems(result.items || [])
       if (!quiet) toast('적재 스케줄과 Airflow 처리상태를 새로고침했습니다.')
     } catch (error) { toast((error as Error).message) }
   }
