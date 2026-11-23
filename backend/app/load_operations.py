@@ -115,7 +115,7 @@ def build_manifest(plan: LoadPlanInput, chunks: list[dict[str, Any]]) -> dict[st
         "max_parallelism": plan.max_parallelism,
         "split_strategy": plan.split_strategy,
         "plan_fingerprint": plan_fingerprint(plan),
-        "tasks": ["check_source", "prepare_staging", "load_chunks", "validate_staging", "publish_l0", "validate_consistency"] if plan.load_mode == "INIT" else ["check_source", "read_watermark", "load_incremental", "publish_l0", "save_watermark"],
+        "tasks": ["check_source", "prepare_staging", "load_chunks", "validate_staging", "call_l0_procedure", "publish_l0", "validate_consistency"] if plan.load_mode == "INIT" else ["check_source", "read_watermark", "load_incremental", "validate_staging", "call_l0_procedure", "publish_l0", "save_watermark"],
         "chunks": chunks,
         "incremental_activation": "after_initial_validation" if plan.load_mode == "INIT" else None,
     }

@@ -24,7 +24,7 @@ def test_incremental_manifest_is_locked_to_watermark_and_separate_dag():
     })
     manifest = build_manifest(plan, build_chunks(plan))
     assert manifest["dag_id"].startswith("MV_INCREMENTAL_")
-    assert manifest["tasks"] == ["check_source", "read_watermark", "load_incremental", "publish_l0", "save_watermark"]
+    assert manifest["tasks"] == ["check_source", "read_watermark", "load_incremental", "validate_staging", "call_l0_procedure", "publish_l0", "save_watermark"]
 
 
 

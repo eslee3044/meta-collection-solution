@@ -1182,6 +1182,15 @@ def update_incremental_config(plan_id: int, payload: IncrementalConfigIn, sessio
     plan = session.get(DatalakeLoadPlan, plan_id)
     if not plan:
         raise HTTPException(404, "적재 계획을 찾을 수 없습니다.")
+    identity = RegisteredTableIdentity(system_cd=plan.system_cd, instance_name=plan.instance_name, postfix=plan.postfix, owner=plan.owner, table_name=plan.table_name)
+    try:
+        spec = _registered_table_spec(session, identity)
+    except ValueError as error:
+        raise HTTPException(409, f"메타 컬럼 기준을 확인할 수 없습니다: {error}") from error
+    if spec.strategy == "TRUNCATE_INSERT":
+        raise HTTPException(409, "TRUNCATE/INSERT 방식은 변경분 기준이 없어 증분 적재를 설정할 수 없습니다. 전체 재적재로 운영하세요.")
+    if payload.watermark_column.strip().upper() not in {column.upper() for column in spec.update_base_columns}:
+        raise HTTPException(422, f"워터마크 컬럼은 UPDATE_BASE_YN='Y' 컬럼 중에서만 선택할 수 있습니다. 사용 가능 컬럼: {', '.join(spec.update_base_columns) or '없음'}")
     if plan.initial_status != "COMPLETED" or plan.incremental_status not in {"READY", "SCHEDULE_ACTIVE"}:
         raise HTTPException(409, "초기 적재가 완료된 계획만 증분 적재를 설정할 수 있습니다.")
     if payload.enabled and _orchestration_config(session).mode != "AIRFLOW_MANAGED":
@@ -1200,7 +1209,7 @@ def update_incremental_config(plan_id: int, payload: IncrementalConfigIn, sessio
         if dag.status == "DEPLOYED":
             dag.status = "DRAFT"
     session.commit()
-    return {"plan_id": plan_id, "initial_status": plan.initial_status, "incremental_status": plan.incremental_status, "schedule": plan.incremental_schedule, "watermark_column": plan.source_watermark, "enabled": plan.incremental_enabled, "requires_redeploy": bool(dag and dag.status == "DRAFT"), "actor": actor.email}
+    return {"plan_id": plan_id, "initial_status": plan.initial_status, "incremental_status": plan.incremental_status, "schedule": plan.incremental_schedule, "watermark_column": plan.source_watermark, "watermark_candidates": list(spec.update_base_columns), "load_strategy": spec.strategy, "enabled": plan.incremental_enabled, "requires_redeploy": bool(dag and dag.status == "DRAFT"), "actor": actor.email}
 
 
 @app.post("/api/datalake-load/plans/{plan_id}/dags")
