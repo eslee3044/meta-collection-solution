@@ -114,6 +114,7 @@ async def lifespan(_: FastAPI):
             connection.execute(text("ALTER TABLE meta_table_config ADD COLUMN IF NOT EXISTS description_ai_enabled BOOLEAN NOT NULL DEFAULT FALSE"))
             connection.execute(text("ALTER TABLE meta_table_config ADD COLUMN IF NOT EXISTS description_ai_provider VARCHAR(30) NOT NULL DEFAULT 'rules'"))
             connection.execute(text("ALTER TABLE meta_table_config ADD COLUMN IF NOT EXISTS description_ai_model VARCHAR(120) NOT NULL DEFAULT 'qwen3:latest'"))
+            connection.execute(text("ALTER TABLE datalake_orchestration_config ADD COLUMN IF NOT EXISTS airflow_url VARCHAR(500) NOT NULL DEFAULT 'http://localhost:8085'"))
             for column_name, definition in column_tracking_columns.items():
                 connection.execute(text(f'ALTER TABLE "EAPET"."TB_META_COLUMNS_EXT" ADD COLUMN IF NOT EXISTS "{column_name}" {definition}'))
     if engine.dialect.name != "postgresql":
@@ -124,6 +125,11 @@ async def lifespan(_: FastAPI):
             "description_ai_provider": "VARCHAR(30) NOT NULL DEFAULT 'rules'",
             "description_ai_model": "VARCHAR(120) NOT NULL DEFAULT 'qwen3:latest'",
         }
+        orchestration_columns = {column["name"] for column in inspect(engine).get_columns("datalake_orchestration_config")}
+        if "airflow_url" not in orchestration_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE datalake_orchestration_config ADD COLUMN airflow_url VARCHAR(500) NOT NULL DEFAULT 'http://localhost:8085'"))
+        config_columns = {column["name"] for column in inspect(engine).get_columns("meta_table_config")}
         for column_name, definition in config_migrations.items():
             if column_name not in config_columns:
                 with engine.begin() as connection:
@@ -414,7 +420,7 @@ def apply_source(item: DataSource, payload: DataSourceIn) -> None:
 def _orchestration_config(session: Session) -> DatalakeOrchestrationConfig:
     config = session.get(DatalakeOrchestrationConfig, 1)
     if not config:
-        config = DatalakeOrchestrationConfig(id=1, mode="MANIFEST_ONLY", timezone="Asia/Seoul", incremental_auto_enable=False)
+        config = DatalakeOrchestrationConfig(id=1, mode="MANIFEST_ONLY", timezone="Asia/Seoul", incremental_auto_enable=False, airflow_url="http://localhost:8085")
         session.add(config)
         session.commit()
         session.refresh(config)
@@ -425,6 +431,7 @@ def _orchestration_output(config: DatalakeOrchestrationConfig, runtime: dict[str
     return DatalakeOrchestrationConfigOut(
         mode=config.mode,
         timezone=config.timezone,
+        airflow_url=config.airflow_url,
         incremental_auto_enable=config.incremental_auto_enable,
         runtime=runtime or {},
         updated_at=config.updated_at,
@@ -1142,7 +1149,7 @@ def get_datalake_schedule_status(session: Session = Depends(get_session), _: Use
                     latest = runs[0]
                     tasks = list_dag_task_instances(dag.dag_id, latest["dag_run_id"])
             items.append({"plan_id": plan.id, "system_cd": plan.system_cd, "instance_name": plan.instance_name, "owner": plan.owner, "table_name": plan.table_name, "plan_status": plan.status, "initial_status": plan.initial_status, "incremental_status": plan.incremental_status, "dag_type": dag.dag_type, "dag_id": dag.dag_id, "dag_status": dag.status, "schedule": dag.schedule, "deployed_at": dag.deployed_at, "airflow_dag": airflow_dag, "runs": runs, "tasks": tasks})
-    return {"mode": config.mode, "timezone": config.timezone, "incremental_auto_enable": config.incremental_auto_enable, "items": items}
+    return {"mode": config.mode, "timezone": config.timezone, "airflow_url": config.airflow_url, "incremental_auto_enable": config.incremental_auto_enable, "items": items}
 
 
 @app.patch("/api/datalake-load/plans/{plan_id}/chunks/{chunk_id}")

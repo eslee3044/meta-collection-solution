@@ -12,18 +12,19 @@ const stateClass = (state?: string | null) => state === 'success' ? 'success' : 
 export default function DatalakeScheduleStatusPage({ toast }: { toast: (message: string) => void }) {
   const [mode, setMode] = useState('MANIFEST_ONLY')
   const [timezone, setTimezone] = useState('Asia/Seoul')
+  const [airflowUrl, setAirflowUrl] = useState('http://localhost:8085')
   const [items, setItems] = useState<ScheduleItem[]>([])
   const [query, setQuery] = useState('')
   const [stateFilter, setStateFilter] = useState('all')
   const [expanded, setExpanded] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const airflowWebUrl = (import.meta.env.VITE_AIRFLOW_URL || 'http://localhost:8085').replace(/\/$/, '')
-  const openAirflow = (path = '') => window.open(`${airflowWebUrl}${path}`, '_blank', 'noopener,noreferrer')
+  const openAirflow = (path = '') => window.open(`${airflowUrl.replace(/\/$/, '')}${path}`, '_blank', 'noopener,noreferrer')
 
   const load = async (quiet = false) => {
     try {
       const result = await api<any>('/api/datalake-load/schedule-status')
       setMode(result.mode || 'MANIFEST_ONLY'); setTimezone(result.timezone || 'Asia/Seoul'); setItems(result.items || [])
+      setAirflowUrl(result.airflow_url || 'http://localhost:8085')
       if (!quiet) toast('적재 스케줄과 Airflow 처리상태를 새로고침했습니다.')
     } catch (error) { toast((error as Error).message) }
   }

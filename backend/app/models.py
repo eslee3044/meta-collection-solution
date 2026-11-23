@@ -95,6 +95,7 @@ class DatalakeOrchestrationConfig(TimestampMixin, Base):
     mode: Mapped[str] = mapped_column(String(30), default="MANIFEST_ONLY")
     timezone: Mapped[str] = mapped_column(String(80), default="Asia/Seoul")
     incremental_auto_enable: Mapped[bool] = mapped_column(Boolean, default=False)
+    airflow_url: Mapped[str] = mapped_column(String(500), default="http://localhost:8085")
     updated_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
