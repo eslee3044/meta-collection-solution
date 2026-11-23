@@ -82,6 +82,11 @@ def preflight() -> dict[str, Any]:
 
 
 
+def set_dag_paused(dag_id: str, paused: bool) -> None:
+    status, _ = _request("PATCH", f"dags/{dag_id}", {"is_paused": paused})
+    if status != 200:
+        raise HTTPException(status_code=502, detail="Airflow DAG pause 상태를 변경하지 못했습니다.")
+
 def trigger_dag(dag_id: str, *, conf: dict[str, Any] | None = None, run_id: str | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {"conf": conf or {}}
     if run_id:

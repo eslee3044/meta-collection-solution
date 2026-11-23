@@ -29,7 +29,7 @@ from .datalake_query import DatalakeTableNotFound, list_l0_tables, preview_l0_ta
 from .datalake_postgres import apply_postgresql_ddl, explain_postgresql_error, inspect_postgresql_objects
 from .load_service import run_full_load
 from .load_operations import build_chunks, build_manifest, normalize_plan_input, plan_fingerprint, recommend_load_design
-from .airflow_control import list_dag_runs, prepare_source_runtime, preflight as airflow_preflight, trigger_dag
+from .airflow_control import list_dag_runs, prepare_source_runtime, preflight as airflow_preflight, set_dag_paused, trigger_dag
 from .orchestration_mode import validate_mode_change
 from .airflow_dag_factory import render_dag_source
 from .models import CollectionJob, CollectionRun, DataSource, DatalakeTarget, DatalakeOrchestrationConfig, DatalakeLoadPlan, DatalakeLoadChunk, DatalakeLoadDag, Menu, MetaColumnExt, MetaLayoutChange, MetaLayoutChangeAction, MetaPkCandidate, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User, utcnow
@@ -1224,6 +1224,7 @@ def trigger_datalake_airflow_run(plan_id: int, session: Session = Depends(get_se
     dag = session.scalar(select(DatalakeLoadDag).where(DatalakeLoadDag.plan_id == plan_id, DatalakeLoadDag.dag_type == "INIT"))
     if not dag or dag.status != "DEPLOYED":
         raise HTTPException(status_code=409, detail="먼저 INIT DAG를 Airflow에 배포하세요.")
+    set_dag_paused(dag.dag_id, False)
     result = trigger_dag(dag.dag_id, conf={"plan_id": plan_id, "requested_by": actor.email})
     plan.status = "INITIAL_RUNNING"
     session.commit()
