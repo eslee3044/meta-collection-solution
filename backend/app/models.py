@@ -117,6 +117,8 @@ class DatalakeLoadPlan(TimestampMixin, Base):
     source_pool: Mapped[str | None] = mapped_column(String(120), nullable=True)
     allowed_window: Mapped[str | None] = mapped_column(String(120), nullable=True)
     source_watermark: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    incremental_schedule: Mapped[str] = mapped_column(String(120), default="0 2 * * *")
+    incremental_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     plan_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(30), default="DRAFT", index=True)
     initial_status: Mapped[str] = mapped_column(String(30), default="NOT_READY")

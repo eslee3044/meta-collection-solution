@@ -391,6 +391,12 @@ class LoadPlanIn(BaseModel):
     source_watermark: str | None = Field(default=None, max_length=255)
 
 
+class IncrementalConfigIn(BaseModel):
+    schedule: str = Field(default="0 2 * * *", min_length=1, max_length=120)
+    watermark_column: str = Field(min_length=1, max_length=255)
+    enabled: bool = False
+
+
 class LoadChunkStatusIn(BaseModel):
     status: Literal["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "SKIPPED"]
     source_rows: int | None = Field(default=None, ge=0)

@@ -41,7 +41,7 @@ from .collector import available_schema_names, normalize_collection_items, sourc
 from .catalog.collection_permissions import check_collection_catalog_permissions
 from .catalog.oracle import OracleCatalogProvider
 from .scheduler import enqueue_run, request_run_cancel, start_scheduler, stop_scheduler, sync_jobs
-from .schemas import DataSourceIn, DataSourceOut, DatalakeTargetConnectionIn, DatalakeTargetOut, DatalakeTargetReplaceIn, DateColumnRecommendationIn, DescriptionPreviewIn, FullLoadIn, JobIn, JobOut, LoginRequest, LoginResponse, ManualAiApplyIn, ManualAiPromptIn, ManualAiResponseIn, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, DatalakeOrchestrationConfigIn, DatalakeOrchestrationConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut, PkCandidatesGenerateIn, PkCandidatesListResponse, PkCandidatesGenerateResponse, PkCandidateValidateResponse, PkCandidateApplyIn, PkCandidateApplyResponse, PkCandidateRejectIn, RegisteredTableIdentity, RegisteredProcedureApplyIn, RegisteredDatalakePlanApplyIn, LoadPlanRecommendationIn, LoadManualPromptIn, LoadManualValidateIn, LoadPlanIn, LoadChunkStatusIn, SourceRuntimePrepareIn
+from .schemas import DataSourceIn, DataSourceOut, DatalakeTargetConnectionIn, DatalakeTargetOut, DatalakeTargetReplaceIn, DateColumnRecommendationIn, DescriptionPreviewIn, FullLoadIn, JobIn, JobOut, LoginRequest, LoginResponse, ManualAiApplyIn, ManualAiPromptIn, ManualAiResponseIn, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, DatalakeOrchestrationConfigIn, DatalakeOrchestrationConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut, PkCandidatesGenerateIn, PkCandidatesListResponse, PkCandidatesGenerateResponse, PkCandidateValidateResponse, PkCandidateApplyIn, PkCandidateApplyResponse, PkCandidateRejectIn, RegisteredTableIdentity, RegisteredProcedureApplyIn, RegisteredDatalakePlanApplyIn, LoadPlanRecommendationIn, LoadManualPromptIn, LoadManualValidateIn, LoadPlanIn, IncrementalConfigIn, LoadChunkStatusIn, SourceRuntimePrepareIn
 from .security import create_token, decode_token, decrypt_json, encrypt_json, hash_password, verify_password
 from .datalake_target_service import create_target, load_active_connection, replace_target, retest_target, sync_meta_target_database_from_active_target, target_status, test_target_connection
 from .seed import seed
@@ -86,6 +86,12 @@ async def lifespan(_: FastAPI):
         if engine.dialect.name == "postgresql":
             connection.execute(text('CREATE SCHEMA IF NOT EXISTS "EAPET"'))
     Base.metadata.create_all(engine)
+    plan_columns = {column["name"] for column in inspect(engine).get_columns("datalake_load_plans")}
+    plan_migrations = {"incremental_schedule": "VARCHAR(120) NOT NULL DEFAULT '0 2 * * *'", "incremental_enabled": "BOOLEAN NOT NULL DEFAULT FALSE"}
+    for column_name, definition in plan_migrations.items():
+        if column_name not in plan_columns:
+            with engine.begin() as connection:
+                connection.execute(text(f"ALTER TABLE datalake_load_plans ADD COLUMN {column_name} {definition}"))
     if engine.dialect.name == "postgresql":
         with engine.begin() as connection:
             connection.execute(text('ALTER TABLE "EAPET"."TB_META_TABLES_EXT" ADD COLUMN IF NOT EXISTS "SRC_DATA_SOURCE_ID" INTEGER'))
@@ -1088,7 +1094,7 @@ def prepare_datalake_source_runtime(payload: SourceRuntimePrepareIn, session: Se
 @app.get("/api/datalake-load/plans")
 def list_datalake_load_plans(session: Session = Depends(get_session), _: User = Depends(require("jobs:read"))):
     plans = session.scalars(select(DatalakeLoadPlan).order_by(DatalakeLoadPlan.updated_at.desc())).all()
-    return [{"id": p.id, "system_cd": p.system_cd, "instance_name": p.instance_name, "postfix": p.postfix, "owner": p.owner, "table_name": p.table_name, "table_type": p.table_type, "load_mode": p.load_mode, "split_strategy": p.split_strategy, "estimated_rows": p.estimated_rows, "estimated_bytes": p.estimated_bytes, "target_chunk_rows": p.target_chunk_rows, "max_parallelism": p.max_parallelism, "status": p.status, "initial_status": p.initial_status, "incremental_status": p.incremental_status, "plan_fingerprint": p.plan_fingerprint, "updated_at": p.updated_at} for p in plans]
+    return [{"id": p.id, "system_cd": p.system_cd, "instance_name": p.instance_name, "postfix": p.postfix, "owner": p.owner, "table_name": p.table_name, "table_type": p.table_type, "load_mode": p.load_mode, "split_strategy": p.split_strategy, "estimated_rows": p.estimated_rows, "estimated_bytes": p.estimated_bytes, "target_chunk_rows": p.target_chunk_rows, "max_parallelism": p.max_parallelism, "status": p.status, "initial_status": p.initial_status, "incremental_status": p.incremental_status, "incremental_schedule": p.incremental_schedule, "incremental_enabled": p.incremental_enabled, "plan_fingerprint": p.plan_fingerprint, "updated_at": p.updated_at} for p in plans]
 
 
 @app.post("/api/datalake-load/plans", status_code=201)
@@ -1123,7 +1129,7 @@ def get_datalake_load_plan(plan_id: int, session: Session = Depends(get_session)
         raise HTTPException(404, "적재 계획을 찾을 수 없습니다.")
     chunks = session.scalars(select(DatalakeLoadChunk).where(DatalakeLoadChunk.plan_id == plan.id).order_by(DatalakeLoadChunk.chunk_no)).all()
     dags = session.scalars(select(DatalakeLoadDag).where(DatalakeLoadDag.plan_id == plan.id).order_by(DatalakeLoadDag.dag_type)).all()
-    return {"plan": {"id": plan.id, "system_cd": plan.system_cd, "instance_name": plan.instance_name, "postfix": plan.postfix, "owner": plan.owner, "table_name": plan.table_name, "table_type": plan.table_type, "load_mode": plan.load_mode, "split_strategy": plan.split_strategy, "estimated_rows": plan.estimated_rows, "estimated_bytes": plan.estimated_bytes, "target_chunk_rows": plan.target_chunk_rows, "max_parallelism": plan.max_parallelism, "source_pool": plan.source_pool, "allowed_window": plan.allowed_window, "source_watermark": plan.source_watermark, "plan_fingerprint": plan.plan_fingerprint, "status": plan.status, "initial_status": plan.initial_status, "incremental_status": plan.incremental_status}, "chunks": [{"id": c.id, "chunk_no": c.chunk_no, "range_start": c.range_start, "range_end": c.range_end, "expected_rows": c.expected_rows, "source_rows": c.source_rows, "staging_rows": c.staging_rows, "retry_count": c.retry_count, "status": c.status, "error_message": c.error_message, "validation_status": c.validation_status, "checkpoint_at": c.checkpoint_at} for c in chunks], "dags": [{"id": d.id, "dag_type": d.dag_type, "dag_id": d.dag_id, "status": d.status, "schedule": d.schedule, "manifest": json.loads(d.manifest_json)} for d in dags]}
+    return {"plan": {"id": plan.id, "system_cd": plan.system_cd, "instance_name": plan.instance_name, "postfix": plan.postfix, "owner": plan.owner, "table_name": plan.table_name, "table_type": plan.table_type, "load_mode": plan.load_mode, "split_strategy": plan.split_strategy, "estimated_rows": plan.estimated_rows, "estimated_bytes": plan.estimated_bytes, "target_chunk_rows": plan.target_chunk_rows, "max_parallelism": plan.max_parallelism, "source_pool": plan.source_pool, "allowed_window": plan.allowed_window, "source_watermark": plan.source_watermark, "incremental_schedule": plan.incremental_schedule, "incremental_enabled": plan.incremental_enabled, "plan_fingerprint": plan.plan_fingerprint, "status": plan.status, "initial_status": plan.initial_status, "incremental_status": plan.incremental_status}, "chunks": [{"id": c.id, "chunk_no": c.chunk_no, "range_start": c.range_start, "range_end": c.range_end, "expected_rows": c.expected_rows, "source_rows": c.source_rows, "staging_rows": c.staging_rows, "retry_count": c.retry_count, "status": c.status, "error_message": c.error_message, "validation_status": c.validation_status, "checkpoint_at": c.checkpoint_at} for c in chunks], "dags": [{"id": d.id, "dag_type": d.dag_type, "dag_id": d.dag_id, "status": d.status, "schedule": d.schedule, "manifest": json.loads(d.manifest_json)} for d in dags]}
 
 
 
@@ -1171,6 +1177,32 @@ def update_datalake_load_chunk(plan_id: int, chunk_id: int, payload: LoadChunkSt
     return {"id": chunk.id, "status": chunk.status, "initial_status": plan.initial_status if plan else None, "incremental_status": plan.incremental_status if plan else None}
 
 
+@app.patch("/api/datalake-load/plans/{plan_id}/incremental-config")
+def update_incremental_config(plan_id: int, payload: IncrementalConfigIn, session: Session = Depends(get_session), actor: User = Depends(require("jobs:write"))):
+    plan = session.get(DatalakeLoadPlan, plan_id)
+    if not plan:
+        raise HTTPException(404, "적재 계획을 찾을 수 없습니다.")
+    if plan.initial_status != "COMPLETED" or plan.incremental_status not in {"READY", "SCHEDULE_ACTIVE"}:
+        raise HTTPException(409, "초기 적재가 완료된 계획만 증분 적재를 설정할 수 있습니다.")
+    if payload.enabled and _orchestration_config(session).mode != "AIRFLOW_MANAGED":
+        raise HTTPException(409, "증분 적재 활성화는 Airflow 직접 운영 모드에서만 가능합니다.")
+    plan.incremental_schedule = payload.schedule.strip()
+    plan.source_watermark = payload.watermark_column.strip()
+    plan.incremental_enabled = payload.enabled
+    plan.incremental_status = "SCHEDULE_ACTIVE" if payload.enabled else "READY"
+    dag = session.scalar(select(DatalakeLoadDag).where(DatalakeLoadDag.plan_id == plan_id, DatalakeLoadDag.dag_type == "INCREMENTAL"))
+    if dag:
+        manifest = json.loads(dag.manifest_json)
+        manifest["schedule"] = plan.incremental_schedule
+        manifest["source_watermark"] = plan.source_watermark
+        dag.schedule = plan.incremental_schedule
+        dag.manifest_json = json.dumps(manifest, ensure_ascii=False)
+        if dag.status == "DEPLOYED":
+            dag.status = "DRAFT"
+    session.commit()
+    return {"plan_id": plan_id, "initial_status": plan.initial_status, "incremental_status": plan.incremental_status, "schedule": plan.incremental_schedule, "watermark_column": plan.source_watermark, "enabled": plan.incremental_enabled, "requires_redeploy": bool(dag and dag.status == "DRAFT"), "actor": actor.email}
+
+
 @app.post("/api/datalake-load/plans/{plan_id}/dags")
 def create_datalake_load_dags(plan_id: int, session: Session = Depends(get_session), actor: User = Depends(require("jobs:write"))):
     plan = session.get(DatalakeLoadPlan, plan_id)
@@ -1180,15 +1212,21 @@ def create_datalake_load_dags(plan_id: int, session: Session = Depends(get_sessi
     normalized = normalize_plan_input({"system_cd": plan.system_cd, "instance_name": plan.instance_name, "postfix": plan.postfix, "owner": plan.owner, "table_name": plan.table_name, "table_type": plan.table_type, "load_mode": plan.load_mode, "split_strategy": plan.split_strategy, "estimated_rows": plan.estimated_rows, "estimated_bytes": plan.estimated_bytes, "target_chunk_rows": plan.target_chunk_rows, "max_parallelism": plan.max_parallelism, "source_pool": plan.source_pool, "allowed_window": plan.allowed_window, "source_watermark": plan.source_watermark})
     created = []
     for dag_type in ("INIT", "INCREMENTAL"):
-        if dag_type == "INCREMENTAL" and plan.incremental_status != "READY":
+        if dag_type == "INCREMENTAL" and plan.incremental_status not in {"READY", "SCHEDULE_ACTIVE"}:
             continue
         dag_plan = normalize_plan_input({**normalized.__dict__, "load_mode": dag_type})
         manifest = build_manifest(dag_plan, [{"chunk_no": c.chunk_no, "range_start": c.range_start, "range_end": c.range_end, "expected_rows": c.expected_rows, "status": c.status} for c in chunks])
+        if dag_type == "INCREMENTAL":
+            manifest["schedule"] = plan.incremental_schedule
+            manifest["source_watermark"] = plan.source_watermark
         dag_id = manifest["dag_id"]
         dag = session.scalar(select(DatalakeLoadDag).where(DatalakeLoadDag.dag_id == dag_id))
         if not dag:
             dag = DatalakeLoadDag(plan_id=plan_id, dag_type=dag_type, dag_id=dag_id, status="DRAFT", schedule=manifest["schedule"], manifest_json=json.dumps(manifest, ensure_ascii=False))
             session.add(dag)
+        elif dag_type == "INCREMENTAL" and dag.status != "DEPLOYED":
+            dag.schedule = manifest["schedule"]
+            dag.manifest_json = json.dumps(manifest, ensure_ascii=False)
         created.append({"dag_id": dag_id, "dag_type": dag_type, "status": dag.status, "manifest": manifest})
     session.commit()
     return {"plan_id": plan_id, "dags": created, "actor": actor.email}
