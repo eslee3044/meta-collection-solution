@@ -29,7 +29,7 @@ from .datalake_query import DatalakeTableNotFound, list_l0_tables, preview_l0_ta
 from .datalake_postgres import apply_postgresql_ddl, explain_postgresql_error, inspect_postgresql_objects
 from .load_service import run_full_load
 from .load_operations import build_chunks, build_manifest, normalize_plan_input, plan_fingerprint, recommend_load_design
-from .airflow_control import list_dag_runs, prepare_source_runtime, preflight as airflow_preflight, set_dag_paused, trigger_dag
+from .airflow_control import get_dag, list_dag_runs, list_dag_task_instances, prepare_source_runtime, preflight as airflow_preflight, set_dag_paused, trigger_dag
 from .orchestration_mode import validate_mode_change
 from .airflow_dag_factory import render_dag_source
 from .models import CollectionJob, CollectionRun, DataSource, DatalakeTarget, DatalakeOrchestrationConfig, DatalakeLoadPlan, DatalakeLoadChunk, DatalakeLoadDag, Menu, MetaColumnExt, MetaLayoutChange, MetaLayoutChangeAction, MetaPkCandidate, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User, utcnow
@@ -1120,6 +1120,29 @@ def get_datalake_load_plan(plan_id: int, session: Session = Depends(get_session)
     chunks = session.scalars(select(DatalakeLoadChunk).where(DatalakeLoadChunk.plan_id == plan.id).order_by(DatalakeLoadChunk.chunk_no)).all()
     dags = session.scalars(select(DatalakeLoadDag).where(DatalakeLoadDag.plan_id == plan.id).order_by(DatalakeLoadDag.dag_type)).all()
     return {"plan": {"id": plan.id, "system_cd": plan.system_cd, "instance_name": plan.instance_name, "postfix": plan.postfix, "owner": plan.owner, "table_name": plan.table_name, "table_type": plan.table_type, "load_mode": plan.load_mode, "split_strategy": plan.split_strategy, "estimated_rows": plan.estimated_rows, "estimated_bytes": plan.estimated_bytes, "target_chunk_rows": plan.target_chunk_rows, "max_parallelism": plan.max_parallelism, "source_pool": plan.source_pool, "allowed_window": plan.allowed_window, "source_watermark": plan.source_watermark, "plan_fingerprint": plan.plan_fingerprint, "status": plan.status, "initial_status": plan.initial_status, "incremental_status": plan.incremental_status}, "chunks": [{"id": c.id, "chunk_no": c.chunk_no, "range_start": c.range_start, "range_end": c.range_end, "expected_rows": c.expected_rows, "source_rows": c.source_rows, "staging_rows": c.staging_rows, "retry_count": c.retry_count, "status": c.status, "error_message": c.error_message, "validation_status": c.validation_status, "checkpoint_at": c.checkpoint_at} for c in chunks], "dags": [{"id": d.id, "dag_type": d.dag_type, "dag_id": d.dag_id, "status": d.status, "schedule": d.schedule, "manifest": json.loads(d.manifest_json)} for d in dags]}
+
+
+
+
+@app.get("/api/datalake-load/schedule-status")
+def get_datalake_schedule_status(session: Session = Depends(get_session), _: User = Depends(require("jobs:read"))):
+    config = _orchestration_config(session)
+    plans = session.scalars(select(DatalakeLoadPlan).order_by(desc(DatalakeLoadPlan.updated_at), desc(DatalakeLoadPlan.id))).all()
+    items: list[dict[str, Any]] = []
+    for plan in plans:
+        dags = session.scalars(select(DatalakeLoadDag).where(DatalakeLoadDag.plan_id == plan.id).order_by(DatalakeLoadDag.dag_type)).all()
+        for dag in dags:
+            airflow_dag = None
+            runs: list[dict[str, Any]] = []
+            tasks: list[dict[str, Any]] = []
+            if config.mode == "AIRFLOW_MANAGED":
+                airflow_dag = get_dag(dag.dag_id)
+                runs = list_dag_runs(dag.dag_id, limit=5)
+                if runs:
+                    latest = runs[0]
+                    tasks = list_dag_task_instances(dag.dag_id, latest["dag_run_id"])
+            items.append({"plan_id": plan.id, "system_cd": plan.system_cd, "instance_name": plan.instance_name, "owner": plan.owner, "table_name": plan.table_name, "plan_status": plan.status, "initial_status": plan.initial_status, "incremental_status": plan.incremental_status, "dag_type": dag.dag_type, "dag_id": dag.dag_id, "dag_status": dag.status, "schedule": dag.schedule, "deployed_at": dag.deployed_at, "airflow_dag": airflow_dag, "runs": runs, "tasks": tasks})
+    return {"mode": config.mode, "timezone": config.timezone, "incremental_auto_enable": config.incremental_auto_enable, "items": items}
 
 
 @app.patch("/api/datalake-load/plans/{plan_id}/chunks/{chunk_id}")

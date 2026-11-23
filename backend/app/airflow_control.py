@@ -97,6 +97,23 @@ def trigger_dag(dag_id: str, *, conf: dict[str, Any] | None = None, run_id: str 
     return {"dag_id": dag_id, "dag_run_id": response.get("dag_run_id"), "state": response.get("state", "queued"), "execution_date": response.get("execution_date")}
 
 
+def get_dag(dag_id: str) -> dict[str, Any] | None:
+    status, response = _request("GET", f"dags/{dag_id}")
+    if status == 404:
+        return None
+    if status != 200 or not response:
+        raise HTTPException(status_code=502, detail="Airflow DAG 상태를 조회하지 못했습니다.")
+    return response
+
+
+def list_dag_task_instances(dag_id: str, dag_run_id: str) -> list[dict[str, Any]]:
+    status, response = _request("GET", f"dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances")
+    if status == 404:
+        return []
+    if status != 200 or not response:
+        raise HTTPException(status_code=502, detail="Airflow task 상태를 조회하지 못했습니다.")
+    return response.get("task_instances", [])
+
 def list_dag_runs(dag_id: str, *, limit: int = 5) -> list[dict[str, Any]]:
     status, response = _request("GET", f"dags/{dag_id}/dagRuns?limit={max(1, min(limit, 20))}&order_by=-execution_date")
     if status == 404:
