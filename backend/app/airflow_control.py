@@ -127,13 +127,15 @@ def prepare_source_runtime(*, source: Any, credential_mode: str, dedicated_usern
     from .security import decrypt_json
 
     secret = decrypt_json(source.secret_encrypted) if source.secret_encrypted else {}
-    if credential_mode == "dedicated":
+    if str(source.db_type).lower() == "sqlite":
+        username, password = None, None
+    elif credential_mode == "dedicated":
         if not dedicated_username or not dedicated_password:
             raise HTTPException(status_code=400, detail="별도 적재 계정은 사용자명과 비밀번호를 모두 입력해야 합니다.")
         username, password = dedicated_username, dedicated_password
     else:
         username, password = source.username, secret.get("password", "")
-    if not username or not password:
+    if str(source.db_type).lower() != "sqlite" and (not username or not password):
         raise HTTPException(status_code=400, detail="메타 수집 계정 접속정보가 등록되어 있지 않습니다.")
 
     connection_id, pool_name = runtime_names(source.name)
@@ -142,8 +144,8 @@ def prepare_source_runtime(*, source: Any, credential_mode: str, dedicated_usern
         "conn_type": source.db_type,
         "host": source.host,
         "port": source.port,
-        "login": username,
-        "password": password,
+        "login": username or "",
+        "password": password or "",
         "schema": source.database or None,
         "extra": json.dumps({"metavault_source_id": source.id, "credential_mode": credential_mode}),
     }

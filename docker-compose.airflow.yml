@@ -36,6 +36,7 @@ services:
       - ./airflow/dags:/opt/airflow/dags:ro
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins:ro
+      - ./sample:/app/sample:ro
       - ./datalake:/var/lib/metavault/datalake
     command: >-
       bash -c "airflow db migrate &&
