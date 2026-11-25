@@ -339,6 +339,10 @@ class RegisteredTableIdentity(StrictSchema):
     table_name: str = Field(min_length=1, max_length=255)
 
 
+class DatalakeSchemaMigrationApplyIn(StrictSchema):
+    plan_id: int = Field(gt=0)
+
+
 class RegisteredProcedureApplyIn(RegisteredTableIdentity):
     ddl_sql: str | None = Field(default=None, max_length=100000)
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, LiteralString, cast
 
 import duckdb
 import psycopg
@@ -145,6 +145,145 @@ def apply_postgresql_ddl(ddl: str) -> dict[str, Any]:
             cursor.execute(ddl)
         connection.commit()
     return {"engine": "postgresql", "status": "applied"}
+
+def _inspect_migration_with_cursor(cursor, names: list[tuple[str, str]]) -> dict[str, Any]:
+    result: dict[str, Any] = {"objects": [], "blocking_reasons": []}
+    current_user = cursor.execute("SELECT current_user").fetchone()[0]
+    for schema_name, table_name in names:
+        relation = cursor.execute(
+            "SELECT c.oid, c.relkind, c.relrowsecurity, c.relforcerowsecurity, pg_get_userbyid(c.relowner) "
+            "FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname=%s",
+            (schema_name, table_name),
+        ).fetchone()
+        item: dict[str, Any] = {"schema": schema_name, "table": table_name, "exists": relation is not None,
+                                "has_rows": None, "columns": [], "primary_key": [], "dependencies": [], "safe_to_rebuild": False}
+        result["objects"].append(item)
+        if not relation:
+            continue
+        oid, relkind, rls, force_rls, owner = relation
+        if relkind not in ("r", "p"):
+            result["blocking_reasons"].append(f"{schema_name}.{table_name}: 일반/파티션 테이블이 아닙니다.")
+            continue
+        if rls or force_rls:
+            result["blocking_reasons"].append(f"{schema_name}.{table_name}: RLS 설정으로 전체 행 여부를 보증할 수 없습니다.")
+            continue
+        if owner != current_user:
+            result["blocking_reasons"].append(f"{schema_name}.{table_name}: 현재 연결 역할이 테이블 소유자가 아닙니다.")
+            continue
+        qualified = sql.Identifier(schema_name, table_name)
+        item["has_rows"] = bool(cursor.execute(sql.SQL("SELECT EXISTS (SELECT 1 FROM {} LIMIT 1)").format(qualified)).fetchone()[0])
+        item["columns"] = [
+            {"name": row[0], "type": row[1], "nullable": not row[2], "default": row[3], "generated": row[4], "identity": row[5]}
+            for row in cursor.execute(
+                "SELECT a.attname, format_type(a.atttypid,a.atttypmod), a.attnotnull, pg_get_expr(d.adbin,d.adrelid), a.attgenerated, a.attidentity "
+                "FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum "
+                "WHERE a.attrelid=%s AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum", (oid,)
+            ).fetchall()
+        ]
+        pk_row = cursor.execute(
+            "SELECT array_agg(a.attname ORDER BY key.ordinality) FROM pg_constraint c "
+            "CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS key(attnum, ordinality) "
+            "JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=key.attnum "
+            "WHERE c.conrelid=%s AND c.contype='p'", (oid,)
+        ).fetchone()
+        item["primary_key"] = list(pk_row[0] or [])
+        extras = cursor.execute(
+            "SELECT conname::text FROM pg_constraint WHERE (conrelid=%s OR confrelid=%s) AND contype NOT IN ('p') "
+            "UNION ALL SELECT tgname::text FROM pg_trigger WHERE tgrelid=%s AND NOT tgisinternal "
+            "UNION ALL SELECT indexrelid::regclass::text FROM pg_index WHERE indrelid=%s AND NOT indisprimary "
+            "UNION ALL SELECT DISTINCT grantee::text FROM information_schema.table_privileges WHERE table_schema=%s AND table_name=%s AND grantee <> %s "
+            "UNION ALL SELECT DISTINCT v.relname::text FROM pg_depend d JOIN pg_rewrite r ON r.oid=d.objid JOIN pg_class v ON v.oid=r.ev_class WHERE d.refobjid=%s AND v.oid<>%s",
+            (oid, oid, oid, oid, schema_name, table_name, owner, oid, oid),
+        ).fetchall()
+        item["dependencies"] = [str(row[0]) for row in extras]
+        item["safe_to_rebuild"] = not extras and not any(c["default"] or c["generated"] or c["identity"] for c in item["columns"])
+        if extras:
+            result["blocking_reasons"].append(f"{schema_name}.{table_name}: 별도 제약·인덱스·트리거·권한·뷰 종속성이 있어 안전한 재생성이 확인되지 않았습니다.")
+        if not item["safe_to_rebuild"] and not extras:
+            result["blocking_reasons"].append(f"{schema_name}.{table_name}: 기본값 또는 generated/identity 컬럼 재현을 지원하지 않습니다.")
+    return result
+
+
+def inspect_postgresql_migration_pair(st_schema: str, st_table: str, l0_schema: str, l0_table: str) -> dict[str, Any]:
+    """Read-only catalog and exact emptiness inspection; unknown is never empty."""
+    names = [(_identifier(st_schema, "schema"), _identifier(st_table, "table")),
+             (_identifier(l0_schema, "schema"), _identifier(l0_table, "table"))]
+    with _connect_postgres() as connection:
+        with connection.cursor() as cursor:
+            return _inspect_migration_with_cursor(cursor, names)
+
+
+def apply_empty_postgresql_migration(*, st_schema: str, st_table: str, l0_schema: str, l0_table: str,
+                                     desired_columns: list[dict[str, Any]], desired_pk_columns: list[str], ddl: str, plan_key: str,
+                                     expected_physical_fingerprint: str, expected_spec_fingerprint: str) -> dict[str, Any]:
+    """Atomically apply a confirmed empty-pair migration and write an idempotency marker.
+
+    Target metadata and DDL changes share one PostgreSQL transaction. Re-checks
+    catalog, row presence, ownership, and dependencies under ACCESS EXCLUSIVE locks.
+    """
+    import hashlib
+    import json
+
+    names = [(_identifier(st_schema, "schema"), _identifier(st_table, "table")),
+             (_identifier(l0_schema, "schema"), _identifier(l0_table, "table"))]
+    if not re.fullmatch(r"[0-9a-f]{32,64}", plan_key):
+        raise ValueError("invalid migration plan key")
+    with _connect_postgres() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SET LOCAL lock_timeout = '5s'")
+            cursor.execute('CREATE SCHEMA IF NOT EXISTS "metavault_control"')
+            cursor.execute('CREATE TABLE IF NOT EXISTS "metavault_control"."schema_migrations" (plan_key text PRIMARY KEY, spec_fingerprint text NOT NULL, completed_at timestamptz NOT NULL DEFAULT now())')
+            marker = cursor.execute('SELECT spec_fingerprint FROM "metavault_control"."schema_migrations" WHERE plan_key=%s FOR UPDATE', (plan_key,)).fetchone()
+            if marker:
+                if marker[0] != expected_spec_fingerprint:
+                    raise ValueError("PLAN_KEY_CONFLICT: 적용 표식의 목표 구조 지문이 다릅니다.")
+                connection.commit()
+                return {"engine": "postgresql", "status": "already_applied", "idempotent": True}
+            current = _inspect_migration_with_cursor(cursor, names)
+            current_fp = hashlib.sha256(json.dumps(current, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+            if current_fp != expected_physical_fingerprint:
+                raise ValueError("PLAN_STALE: 미리보기 이후 물리 테이블 상태가 바뀌었습니다.")
+            if current["blocking_reasons"] or any(not item["exists"] or item["has_rows"] is not False for item in current["objects"]):
+                raise ValueError("BLOCKED: 두 테이블이 존재하고 비어 있으며 종속성이 없음을 확인해야 합니다.")
+            for schema_name, table_name in names:
+                cursor.execute(sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE NOWAIT").format(sql.Identifier(schema_name, table_name)))
+            locked = _inspect_migration_with_cursor(cursor, names)
+            locked_fp = hashlib.sha256(json.dumps(locked, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+            if locked_fp != expected_physical_fingerprint or locked["blocking_reasons"] or any(item["has_rows"] is not False for item in locked["objects"]):
+                raise ValueError("PLAN_STALE: 잠금 후 재검증에서 구조 또는 행 상태가 달라졌습니다.")
+            actual_layouts = [item["columns"] for item in locked["objects"]]
+            from .datalake_migration import compare_table_layouts
+            comparisons = []
+            for index, layout in enumerate(actual_layouts):
+                comparison = compare_table_layouts(layout, desired_columns)
+                expected_pk = desired_pk_columns if index == 1 else []
+                if list(locked["objects"][index].get("primary_key", [])) != expected_pk:
+                    comparison["changed"] = True
+                    comparison["alter_compatible"] = False
+                    comparison["requires_rebuild"] = True
+                comparisons.append(comparison)
+            if not any(result["changed"] for result in comparisons):
+                cursor.execute('INSERT INTO "metavault_control"."schema_migrations" (plan_key,spec_fingerprint) VALUES (%s,%s)', (plan_key, expected_spec_fingerprint))
+                connection.commit()
+                return {"engine": "postgresql", "status": "no_change", "idempotent": False}
+            if all(result["alter_compatible"] for result in comparisons):
+                for schema_name, table_name, comparison in zip((n[0] for n in names), (n[1] for n in names), comparisons):
+                    for column in comparison["added"]:
+                        column_type = str(column["type"])
+                        if not re.fullmatch(r"[A-Z][A-Z0-9 ]*(?:\([0-9]+(?:,[0-9]+)?\))?", column_type):
+                            raise ValueError("BLOCKED: 검증되지 않은 컬럼 타입입니다.")
+                        statement = sql.SQL("ALTER TABLE {} ADD COLUMN {} ").format(sql.Identifier(schema_name, table_name), sql.Identifier(column["name"])) + sql.SQL(cast(LiteralString, column_type))
+                        cursor.execute(statement)
+            else:
+                if any(not item["safe_to_rebuild"] for item in locked["objects"]):
+                    raise ValueError("BLOCKED: 안전한 재생성 조건을 충족하지 않습니다.")
+                for schema_name, table_name in names:
+                    cursor.execute(sql.SQL("DROP TABLE {}").format(sql.Identifier(schema_name, table_name)))
+                cursor.execute(ddl.replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE"))
+            cursor.execute('INSERT INTO "metavault_control"."schema_migrations" (plan_key,spec_fingerprint) VALUES (%s,%s)', (plan_key, expected_spec_fingerprint))
+        connection.commit()
+    return {"engine": "postgresql", "status": "applied", "idempotent": False}
+
 
 def inspect_postgresql_objects(objects: list[dict[str, Any]]) -> list[dict[str, Any]]:
     with _connect_postgres() as connection:

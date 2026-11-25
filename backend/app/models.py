@@ -408,6 +408,21 @@ class MetaLayoutChangeAction(Base):
     acted_at: Mapped[datetime] = mapped_column("ACTED_AT", DateTime(timezone=True), default=utcnow)
 
 
+class DatalakeSchemaMigration(Base):
+    __tablename__ = "datalake_schema_migrations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    identity_json: Mapped[str] = mapped_column(Text, nullable=False)
+    spec_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    physical_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    plan_json: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PREVIEWED", index=True)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    applied_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class MetaTableConfig(TimestampMixin, Base):
     __tablename__ = "meta_table_config"
     id: Mapped[int] = mapped_column(primary_key=True, default=1)

@@ -57,13 +57,14 @@ def _fingerprint(identity: dict[str, Any], snapshot_id: int | None, columns: lis
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def _snapshot_objects(payload: dict[str, Any]) -> dict[str, tuple[str, dict[str, Any], str]]:
+def _snapshot_objects(payload: dict[str, Any]) -> dict[tuple[str, str], tuple[str, dict[str, Any], str]]:
     result = {}
     for schema in payload.get("schemas", []):
+        schema_name = schema.get("name", "")
         for obj_type, key in (("TABLE", "tables"), ("VIEW", "views")):
             for obj in schema.get(key, []) or []:
                 if obj.get("name"):
-                    result.setdefault(obj["name"], (schema.get("name", ""), obj, obj_type))
+                    result.setdefault((schema_name, obj["name"]), (schema_name, obj, obj_type))
     return result
 
 
@@ -108,8 +109,8 @@ def resolve_registered(session, identity: dict[str, Any]) -> tuple[Any, Any, dic
             snapshots = session.scalars(select(SchemaSnapshot).where(SchemaSnapshot.data_source_id == source_candidate.id).order_by(desc(SchemaSnapshot.captured_at))).all()
             for candidate_snapshot in snapshots:
                 candidate_objects = _snapshot_objects(candidate_snapshot.payload)
-                found_candidate = candidate_objects.get(identity["table_name"])
-                if found_candidate and (not identity["owner"] or found_candidate[0] == identity["owner"]):
+                found_candidate = candidate_objects.get((identity["owner"], identity["table_name"]))
+                if found_candidate:
                     snapshot, source, snapshot_id = candidate_snapshot, source_candidate, candidate_snapshot.id
                     if hasattr(table, "src_data_source_id"):
                         setattr(table, "src_data_source_id", source_candidate.id)
@@ -122,7 +123,7 @@ def resolve_registered(session, identity: dict[str, Any]) -> tuple[Any, Any, dic
         raise HTTPException(404, "등록 메타에 연결된 원천 수집 스냅샷을 찾을 수 없습니다. 원천 연결 또는 수집 이력을 확인해 주세요.")
     objects = _snapshot_objects(snapshot.payload)
     object_name = identity["table_name"]
-    found = objects.get(object_name)
+    found = objects.get((identity["owner"], object_name))
     if not found:
         raise HTTPException(409, "현재 스냅샷에 등록 객체가 없습니다.")
     owner, obj, object_type = found
@@ -133,6 +134,22 @@ def resolve_registered(session, identity: dict[str, Any]) -> tuple[Any, Any, dic
 
 def _source_pk(obj: dict[str, Any]) -> list[str]:
     return list((obj.get("primary_key") or {}).get("constrained_columns") or [])
+
+
+def _match_source_pk_columns(registered_columns: list[str], source_pk: list[str]) -> list[str]:
+    """Map source PK names to registered spellings, preferring exact matches."""
+    matched = []
+    for source_name in source_pk:
+        exact = [name for name in registered_columns if name == source_name]
+        candidates = exact or [name for name in registered_columns if name.casefold() == source_name.casefold()]
+        if not candidates:
+            raise HTTPException(409, f"원천 PK 컬럼 '{source_name}'을 등록 메타에서 찾을 수 없습니다. 컬럼 메타를 새로고침해 주세요.")
+        if len(candidates) > 1:
+            raise HTTPException(409, f"원천 PK 컬럼 '{source_name}'이 여러 등록 컬럼과 일치합니다. 컬럼 메타를 확인해 주세요.")
+        matched.append(candidates[0])
+    if len(set(matched)) != len(matched):
+        raise HTTPException(409, "원천 PK 컬럼이 등록 메타에서 중복 매핑됩니다. 컬럼 메타를 확인해 주세요.")
+    return matched
 
 
 def _column_names(obj: dict[str, Any]) -> set[str]:
@@ -251,16 +268,27 @@ def generate(session, payload: Any, actor: str, recommender) -> dict[str, Any]:
     # Physical PK is authoritative.  Synchronization and response happen without recommender.
     if source_pk:
         if config.source_type != "external":
+            registered_columns = session.scalars(select(MetaColumnExt.column_name).filter_by(**identity)).all()
+            mapped_source_pk = _match_source_pk_columns(registered_columns, source_pk)
             session.query(MetaColumnExt).filter_by(**identity).update({MetaColumnExt.pk_yn: "N"}, synchronize_session=False)
-            session.query(MetaColumnExt).filter(MetaColumnExt.system_cd == identity["system_cd"], MetaColumnExt.instance_name == identity["instance_name"], MetaColumnExt.postfix == identity["postfix"], MetaColumnExt.owner == identity["owner"], MetaColumnExt.table_name == identity["table_name"], MetaColumnExt.column_name.in_(source_pk)).update({MetaColumnExt.pk_yn: "Y"}, synchronize_session=False)
+            session.query(MetaColumnExt).filter_by(**identity).filter(MetaColumnExt.column_name.in_(mapped_source_pk)).update({MetaColumnExt.pk_yn: "Y"}, synchronize_session=False)
+            verified_source_pk = session.scalars(select(MetaColumnExt.column_name).filter_by(**identity).where(MetaColumnExt.pk_yn == "Y", MetaColumnExt.column_name.in_(mapped_source_pk))).all()
+            if set(verified_source_pk) != set(mapped_source_pk):
+                session.rollback()
+                raise HTTPException(409, "원천 PK가 등록 메타에 모두 반영되지 않았습니다. 컬럼 메타를 새로고침해 주세요.")
             session.commit()
         else:
             with source_engine(source).begin() as connection:
                 _, columns_table, _ = _external_tables(source, config, connection)
                 columns = {str(c.name).lower(): c for c in columns_table.c}
                 where = and_(*[columns[key] == identity[key] for key in KEYS])
+                registered_columns = connection.execute(select(columns["column_name"]).where(where)).scalars().all()
+                mapped_source_pk = _match_source_pk_columns(registered_columns, source_pk)
                 connection.execute(update(columns_table).where(where).values({columns["pk_yn"]: "N"}))
-                connection.execute(update(columns_table).where(and_(where, columns["column_name"].in_(source_pk))).values({columns["pk_yn"]: "Y"}))
+                connection.execute(update(columns_table).where(and_(where, columns["column_name"].in_(mapped_source_pk))).values({columns["pk_yn"]: "Y"}))
+                verified_source_pk = connection.execute(select(columns["column_name"]).where(and_(where, columns["pk_yn"] == "Y", columns["column_name"].in_(mapped_source_pk)))).scalars().all()
+                if set(verified_source_pk) != set(mapped_source_pk):
+                    raise HTTPException(409, "원천 PK가 등록 메타에 모두 반영되지 않았습니다. 컬럼 메타를 새로고침해 주세요.")
         return {"source_pk_applied": True, "source_pk_columns": source_pk, "candidates": [], "message": "원천 PK가 있어 그대로 적용했습니다."}
     provider = config.description_ai_provider if getattr(config, "description_ai_enabled", False) else "rules"
     result = recommender({**obj, "object_type": object_type}, provider, getattr(config, "description_ai_model", "qwen3:latest"))
@@ -291,7 +319,7 @@ def list_candidates(session, payload: Any) -> dict[str, Any]:
     config, registered, obj, _, _ = resolve_registered(session, identity)
     source_pk = _source_pk(obj)
     columns = session.scalars(select(MetaColumnExt).filter_by(**identity).order_by(MetaColumnExt.column_id)).all() if config.source_type != "external" else []
-    current = source_pk or [c.column_name for c in columns if c.pk_yn == "Y"]
+    current = [c.column_name for c in columns if c.pk_yn == "Y"]
     source = "SOURCE_PK" if source_pk else ("LOGICAL_PK" if current else "NONE")
     if config.source_type == "external":
         external = _external_config_source(session)
@@ -303,7 +331,7 @@ def list_candidates(session, payload: Any) -> dict[str, Any]:
             ccols = {str(c.name).lower(): c for c in columns_table.c}
             cwhere = and_(*[ccols[key] == identity[key] for key in KEYS])
             rows = connection.execute(select(columns_table).where(cwhere)).mappings().all()
-            current = source_pk or [_row_value(row, "column_name") for row in rows if str(_row_value(row, "pk_yn", "N")).upper() == "Y"]
+            current = [_row_value(row, "column_name") for row in rows if str(_row_value(row, "pk_yn", "N")).upper() == "Y"]
             candidate_cols = {str(c.name).lower(): c for c in candidates_table.c}
             candidate_where = and_(*[candidate_cols[key] == identity[key] for key in KEYS], candidate_cols["src_snapshot_id"] == getattr(registered, "src_snapshot_id", None))
             candidate_rows = connection.execute(select(candidates_table).where(candidate_where).order_by(candidate_cols["candidate_rank"], candidate_cols["candidate_id"])).mappings().all()

@@ -3,8 +3,10 @@ from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
 
 from app import pk_candidate_service as service
+from app.models import MetaColumnExt, MetaPkCandidate
 from app.schemas import PkCandidate
 
 
@@ -61,6 +63,69 @@ def _external_session(engine):
     return session, source, config
 
 
+def test_snapshot_object_lookup_disambiguates_duplicate_table_names_by_owner():
+    payload = {
+        "schemas": [
+            {"name": "METATEST", "tables": [{"name": "MV_TEST_CUSTOMERS", "columns": [{"name": "WRONG_OWNER_COLUMN"}]}]},
+            {"name": "METAVAULT_ORA_TEST", "tables": [{"name": "MV_TEST_CUSTOMERS", "columns": [{"name": "CUSTOMER_ID"}]}]},
+        ]
+    }
+
+    objects = service._snapshot_objects(payload)
+
+    assert objects[("METAVAULT_ORA_TEST", "MV_TEST_CUSTOMERS")][1]["columns"] == [{"name": "CUSTOMER_ID"}]
+
+
+def test_list_candidates_does_not_report_source_pk_as_already_applied(monkeypatch):
+    engine = create_engine("sqlite://", execution_options={"schema_translate_map": {"EAPET": None}})
+    MetaColumnExt.__table__.create(engine)
+    MetaPkCandidate.__table__.create(engine)
+    session = sessionmaker(engine)()
+    session.add(MetaColumnExt(**IDENTITY, column_name="CUSTOMER_ID", pk_yn="N"))
+    session.commit()
+    config = SimpleNamespace(source_type="internal")
+    registered = SimpleNamespace(src_snapshot_id=116)
+    snapshot_object = {"primary_key": {"constrained_columns": ["customer_id"]}}
+    monkeypatch.setattr(service, "resolve_registered", lambda *_: (config, registered, snapshot_object, "TABLE", None))
+
+    result = service.list_candidates(session, SimpleNamespace(**IDENTITY))
+
+    assert result["source_pk_columns"] == ["customer_id"]
+    assert result["current_pk_columns"] == []
+    assert result["current_pk_source"] == "SOURCE_PK"
+    session.close()
+    engine.dispose()
+
+
+def test_generate_applies_source_pk_case_insensitively_to_registered_column(monkeypatch):
+    engine = create_engine("sqlite://", execution_options={"schema_translate_map": {"EAPET": None}})
+    MetaColumnExt.__table__.create(engine)
+    MetaPkCandidate.__table__.create(engine)
+    session = sessionmaker(engine)()
+    column = MetaColumnExt(**IDENTITY, column_name="CUSTOMER_ID", pk_yn="N")
+    session.add(column)
+    session.commit()
+    config = SimpleNamespace(source_type="internal")
+    registered = SimpleNamespace(src_snapshot_id=116)
+    snapshot_object = {"primary_key": {"constrained_columns": ["customer_id"]}}
+    monkeypatch.setattr(service, "resolve_registered", lambda *_: (config, registered, snapshot_object, "TABLE", None))
+
+    result = service.generate(
+        session,
+        SimpleNamespace(**IDENTITY),
+        "tester",
+        lambda *_: pytest.fail("source PK must bypass recommendation"),
+    )
+
+    assert result["source_pk_applied"] is True
+    assert session.get(MetaColumnExt, (*[IDENTITY[key] for key in service.KEYS], "CUSTOMER_ID")).pk_yn == "Y"
+    listing = service.list_candidates(session, SimpleNamespace(**IDENTITY))
+    assert listing["source_pk_columns"] == ["customer_id"]
+    assert listing["current_pk_columns"] == ["CUSTOMER_ID"]
+    session.close()
+    engine.dispose()
+
+
 def test_candidate_response_schema_accepts_persisted_validation_fields():
     candidate = PkCandidate.model_validate({
         "candidate_id": 1,
@@ -81,6 +146,21 @@ def test_candidate_response_schema_accepts_persisted_validation_fields():
     })
     assert candidate.src_snapshot_id == 10
     assert candidate.row_count is None
+
+
+def test_external_generate_applies_source_pk_case_insensitively(monkeypatch):
+    engine = _external_db()
+    session, source, config = _external_session(engine)
+    monkeypatch.setattr(service, "source_engine", lambda _: engine)
+    obj = {"primary_key": {"constrained_columns": ["order_no"]}}
+    monkeypatch.setattr(service, "resolve_registered", lambda *_: (config, {"SRC_SNAPSHOT_ID": 10}, obj, "TABLE", source))
+
+    result = service.generate(session, SimpleNamespace(**IDENTITY), "tester", lambda *_: pytest.fail("source PK must bypass recommendation"))
+
+    assert result["source_pk_applied"] is True
+    with engine.connect() as connection:
+        rows = dict(connection.execute(text("SELECT COLUMN_NAME, PK_YN FROM TB_META_COLUMNS_EXT")).all())
+    assert rows == {"ORDER_NO": "Y", "LINE_NO": "N", "AMOUNT": "N"}
 
 
 def test_external_generate_persists_and_list_returns_candidates(monkeypatch):

@@ -140,6 +140,11 @@ def build_table_spec(metadata: Mapping[str, Any]) -> TableSpec:
     return TableSpec(system, owner, source_table, st_schema, l0_schema, st_table, l0_table, procedure, columns, pk, updates, partition, strategy, tuple(reasons))
 
 
+def table_layout_columns(spec: TableSpec) -> list[dict[str, Any]]:
+    """Return physical columns in exact DDL order for ST/L0 schema comparison."""
+    return [{"name": column.name, "type": column.data_type, "nullable": column.nullable} for column in _columns(spec)]
+
+
 def table_spec_fingerprint(spec: TableSpec) -> str:
     payload = asdict(spec)
     payload["columns"] = [asdict(column) for column in spec.columns]
@@ -155,7 +160,8 @@ def _standard_columns() -> tuple[ColumnSpec, ...]:
 
 
 def _columns(spec: TableSpec) -> tuple[ColumnSpec, ...]:
-    return spec.columns + _standard_columns()
+    standard = _standard_columns()
+    return standard[:2] + spec.columns + standard[2:]
 
 
 def _column_definitions(spec: TableSpec) -> str:

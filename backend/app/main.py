@@ -24,15 +24,16 @@ from .dependencies import current_user, require
 from .excel_export import build_schema_workbook, build_sources_workbook
 from .integration import ensure_integration_views, snapshot_diff, snapshot_summary
 from .datalake import datalake_root
-from .datalake_ddl import build_table_spec, render_postgresql_ddl, render_postgresql_procedure_scripts, table_spec_fingerprint
+from .datalake_ddl import build_table_spec, render_postgresql_ddl, render_postgresql_procedure_scripts, table_layout_columns, table_spec_fingerprint
+from .datalake_migration import apply_column_metadata_change, build_migration_status, classify_target_state, compare_table_layouts
 from .datalake_query import DatalakeTableNotFound, list_l0_tables, preview_l0_table
-from .datalake_postgres import apply_postgresql_ddl, explain_postgresql_error, inspect_postgresql_objects
+from .datalake_postgres import apply_empty_postgresql_migration, apply_postgresql_ddl, explain_postgresql_error, inspect_postgresql_objects, inspect_postgresql_migration_pair
 from .load_service import run_full_load
 from .load_operations import build_chunks, build_manifest, normalize_plan_input, plan_fingerprint, recommend_load_design
 from .airflow_control import get_dag, list_dag_runs, list_dag_task_instances, prepare_source_runtime, preflight as airflow_preflight, set_dag_paused, trigger_dag
 from .orchestration_mode import validate_mode_change
 from .airflow_dag_factory import render_dag_source
-from .models import CollectionJob, CollectionRun, DataSource, DatalakeTarget, DatalakeOrchestrationConfig, DatalakeLoadPlan, DatalakeLoadChunk, DatalakeLoadDag, Menu, MetaColumnExt, MetaLayoutChange, MetaLayoutChangeAction, MetaPkCandidate, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User, utcnow
+from .models import CollectionJob, CollectionRun, DataSource, DatalakeTarget, DatalakeSchemaMigration, DatalakeOrchestrationConfig, DatalakeLoadPlan, DatalakeLoadChunk, DatalakeLoadDag, Menu, MetaColumnExt, MetaLayoutChange, MetaLayoutChangeAction, MetaPkCandidate, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User, utcnow
 from .ai_description import recommend_date_columns, suggest_descriptions, suggest_table_description
 from .manual_ai import build_manual_prompt, validate_manual_response
 from .load_manual_ai import build_load_prompt, validate_load_response
@@ -41,7 +42,7 @@ from .collector import available_schema_names, normalize_collection_items, sourc
 from .catalog.collection_permissions import check_collection_catalog_permissions
 from .catalog.oracle import OracleCatalogProvider
 from .scheduler import enqueue_run, request_run_cancel, start_scheduler, stop_scheduler, sync_jobs
-from .schemas import DataSourceIn, DataSourceOut, DatalakeTargetConnectionIn, DatalakeTargetOut, DatalakeTargetReplaceIn, DateColumnRecommendationIn, DescriptionPreviewIn, FullLoadIn, JobIn, JobOut, LoginRequest, LoginResponse, ManualAiApplyIn, ManualAiPromptIn, ManualAiResponseIn, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, DatalakeOrchestrationConfigIn, DatalakeOrchestrationConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut, PkCandidatesGenerateIn, PkCandidatesListResponse, PkCandidatesGenerateResponse, PkCandidateValidateResponse, PkCandidateApplyIn, PkCandidateApplyResponse, PkCandidateRejectIn, RegisteredTableIdentity, RegisteredProcedureApplyIn, RegisteredDatalakePlanApplyIn, LoadPlanRecommendationIn, LoadManualPromptIn, LoadManualValidateIn, LoadPlanIn, IncrementalConfigIn, LoadChunkStatusIn, SourceRuntimePrepareIn
+from .schemas import DataSourceIn, DataSourceOut, DatalakeTargetConnectionIn, DatalakeTargetOut, DatalakeTargetReplaceIn, DatalakeSchemaMigrationApplyIn, DateColumnRecommendationIn, DescriptionPreviewIn, FullLoadIn, JobIn, JobOut, LoginRequest, LoginResponse, ManualAiApplyIn, ManualAiPromptIn, ManualAiResponseIn, MenuIn, MetaRegisterIn, MetaTableConfigIn, MetaTableConfigOut, DatalakeOrchestrationConfigIn, DatalakeOrchestrationConfigOut, PasswordChangeIn, RoleIn, RunLogOut, RunOut, UserIn, UserOut, PkCandidatesGenerateIn, PkCandidatesListResponse, PkCandidatesGenerateResponse, PkCandidateValidateResponse, PkCandidateApplyIn, PkCandidateApplyResponse, PkCandidateRejectIn, RegisteredTableIdentity, RegisteredProcedureApplyIn, RegisteredDatalakePlanApplyIn, LoadPlanRecommendationIn, LoadManualPromptIn, LoadManualValidateIn, LoadPlanIn, IncrementalConfigIn, LoadChunkStatusIn, SourceRuntimePrepareIn
 from .security import create_token, decode_token, decrypt_json, encrypt_json, hash_password, verify_password
 from .datalake_target_service import create_target, load_active_connection, replace_target, retest_target, sync_meta_target_database_from_active_target, target_status, test_target_connection
 from .seed import seed
@@ -2091,7 +2092,7 @@ def registered_metadata(
     for column in columns:
         key = (column.system_cd, column.instance_name, column.postfix, column.owner, column.table_name)
         grouped.setdefault(key, []).append({"column_name": column.column_name, "column_id": column.column_id, "data_type": column.data_type, "data_length": column.data_length, "data_precision": column.data_precision, "data_scale": column.data_scale, "null_yn": column.null_yn, "pk_yn": column.pk_yn, "partition_key_yn": column.partition_key_yn, "update_base_yn": column.update_base_yn, "comments": column.comments})
-    items = [{"system_cd": table.system_cd, "instance_name": table.instance_name, "postfix": table.postfix, "owner": table.owner, "table_name": table.table_name, "table_type": table.table_type or "TABLE", "database_name": table.database_name, "etl_conn_div_cd": table.etl_conn_div_cd, "etl_conn_nm": table.etl_conn_nm, "tgt_ds_cd": table.tgt_ds_cd, "tgt_table_name": table.tgt_table_name, "tgt_database_name": table.tgt_database_name, "comments": table.comments, "lastupdated": table.lastupdated, "createdon": table.createdon, "columns": grouped.get((table.system_cd, table.instance_name, table.postfix, table.owner, table.table_name), [])} for table in tables]
+    items = [{"system_cd": table.system_cd, "instance_name": table.instance_name, "postfix": table.postfix, "owner": table.owner, "table_name": table.table_name, "table_type": table.table_type or "TABLE", "database_name": table.database_name, "etl_conn_div_cd": table.etl_conn_div_cd, "etl_conn_nm": table.etl_conn_nm, "tgt_ds_cd": table.tgt_ds_cd, "tgt_table_name": table.tgt_table_name, "tgt_database_name": table.tgt_database_name, "comments": table.comments, "metadata_sync_status": table.metadata_sync_status, "metadata_sync_message": table.metadata_sync_message, "lastupdated": table.lastupdated, "createdon": table.createdon, "columns": grouped.get((table.system_cd, table.instance_name, table.postfix, table.owner, table.table_name), [])} for table in tables]
     sources = sorted({source for source in session.scalars(select(MetaTableExt.instance_name).distinct()).all() if source})
     return {"items": items, "total": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size, "sources": sources, "source_counts": source_counts}
 
@@ -2112,7 +2113,10 @@ def _registered_table_spec(session: Session, identity: RegisteredTableIdentity):
         MetaColumnExt.postfix == identity.postfix,
         MetaColumnExt.owner == identity.owner,
         MetaColumnExt.table_name == identity.table_name,
+        MetaColumnExt.is_active == "Y",
+        MetaColumnExt.column_status != "INACTIVE",
     ).order_by(MetaColumnExt.column_id, MetaColumnExt.column_name)).all()
+    columns = sorted((column for column in columns if column.is_active == "Y" and column.column_status != "INACTIVE"), key=lambda column: (column.column_id is None, column.column_id or 0, column.column_name))
     metadata = {
         "system_cd": table.system_cd,
         "owner": table.owner,
@@ -2136,6 +2140,155 @@ def _registered_table_spec(session: Session, identity: RegisteredTableIdentity):
 
 def needs_full_snapshot_ack(spec) -> bool:
     return spec.strategy == "TRUNCATE_INSERT" and not spec.pk_columns and not spec.update_base_columns and not spec.partition_column
+
+
+def _migration_physical_fingerprint(inspection: dict[str, Any]) -> str:
+    canonical = json.dumps(inspection, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@app.post("/api/metadata/registered/datalake-migrations/status")
+def datalake_schema_migration_status(identity: RegisteredTableIdentity, session: Session = Depends(get_session), _: User = Depends(require("metadata:read"))):
+    """Read-only comparison used to show the migration action only when needed."""
+    target = target_status(session)
+    if not target.get("configured") or target.get("target_type") != "postgresql":
+        return {"needs_migration": False, "status": "UNAVAILABLE", "route": "BLOCKED"}
+    try:
+        spec = _registered_table_spec(session, identity)
+        physical = inspect_postgresql_migration_pair(spec.st_schema, spec.st_table, spec.l0_schema, spec.l0_table)
+        result = build_migration_status(
+            identity=identity.model_dump(), strategy=spec.strategy, desired_pk_columns=list(spec.pk_columns),
+            st={"schema": spec.st_schema, "table": spec.st_table},
+            l0={"schema": spec.l0_schema, "table": spec.l0_table},
+            desired=table_layout_columns(spec), physical=physical,
+        )
+        return {"needs_migration": result["needs_migration"], "changed": result["changed"],
+                "status": result["status"], "route": result["route"], "reason": result["reason"],
+                "blocking_reasons": result["blocking_reasons"]}
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    except Exception as error:
+        logger.warning("Datalake migration status check failed: %s", explain_postgresql_error(error))
+        return {"needs_migration": False, "status": "UNKNOWN", "route": "BLOCKED"}
+
+
+@app.post("/api/metadata/registered/datalake-migrations/preview")
+def preview_datalake_schema_migration(identity: RegisteredTableIdentity, session: Session = Depends(get_session), actor: User = Depends(require("metadata:read"))):
+    target = target_status(session)
+    if not target.get("configured") or target.get("target_type") != "postgresql":
+        raise HTTPException(409, "구조 변경 계획은 PostgreSQL Datalake Target에서만 만들 수 있습니다.")
+    try:
+        spec = _registered_table_spec(session, identity)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    desired = table_layout_columns(spec)
+    try:
+        physical = inspect_postgresql_migration_pair(spec.st_schema, spec.st_table, spec.l0_schema, spec.l0_table)
+        objects = physical["objects"]
+        state = classify_target_state(
+            st_exists=objects[0]["exists"], l0_exists=objects[1]["exists"],
+            st_rows=(0 if objects[0].get("has_rows") is False else 1 if objects[0].get("has_rows") is True else None),
+            l0_rows=(0 if objects[1].get("has_rows") is False else 1 if objects[1].get("has_rows") is True else None),
+        )
+        comparisons = []
+        if all(item["exists"] for item in objects):
+            comparisons = []
+            for index, item in enumerate(objects):
+                comparison = compare_table_layouts(item["columns"], desired)
+                expected_pk = list(spec.pk_columns) if index == 1 else []
+                current_pk = list(item.get("primary_key", []))
+                comparison["primary_key_before"] = current_pk
+                comparison["primary_key_after"] = expected_pk
+                comparison["primary_key_changed"] = current_pk != expected_pk
+                if comparison["primary_key_changed"]:
+                    comparison["changed"] = True
+                    comparison["requires_rebuild"] = True
+                    comparison["alter_compatible"] = False
+                comparisons.append({"schema": item["schema"], "table": item["table"],
+                    "comparison": comparison, "safe_to_rebuild": item["safe_to_rebuild"], "dependencies": item["dependencies"]})
+        changed = any(item["comparison"]["changed"] for item in comparisons)
+        blockers = list(physical.get("blocking_reasons", []))
+        status = state["status"]
+        route = state["route"]
+        if route == "APPLY_EMPTY" and not changed:
+            status, route = "NO_CHANGE", "NO_CHANGE"
+        elif route == "APPLY_EMPTY" and any(item["comparison"]["requires_rebuild"] and not item["safe_to_rebuild"] for item in comparisons):
+            status, route = "BLOCKED", "BLOCKED"
+            blockers.append("목표 레이아웃 적용에 재생성이 필요하지만 종속 객체가 있어 안전한 교체가 불가합니다.")
+        if blockers and route not in {"CREATE_NEW", "TOBE_REQUIRED"}:
+            status, route = "BLOCKED", "BLOCKED"
+        response = {"status": status, "route": route, "reason": state["reason"], "initial_load_required": state["initial_load_required"],
+                    "identity": identity.model_dump(), "strategy": spec.strategy,
+                    "st": {"schema": spec.st_schema, "table": spec.st_table}, "l0": {"schema": spec.l0_schema, "table": spec.l0_table},
+                    "desired_columns": desired, "comparisons": comparisons, "blocking_reasons": blockers,
+                    "changed": changed, "needs_migration": changed, "physical": physical}
+    except HTTPException:
+        raise
+    except Exception as error:
+        response = {"status": "BLOCKED", "route": "BLOCKED", "reason": "Datalake 대상 구조를 안전하게 확인하지 못했습니다.",
+                    "initial_load_required": None, "identity": identity.model_dump(), "blocking_reasons": [explain_postgresql_error(error)],
+                    "comparisons": [], "physical": {"objects": [], "blocking_reasons": []}}
+        spec = _registered_table_spec(session, identity)
+    spec_fingerprint = table_spec_fingerprint(spec)
+    physical_fingerprint = _migration_physical_fingerprint(response.get("physical", {}))
+    record = DatalakeSchemaMigration(identity_json=json.dumps(identity.model_dump(), ensure_ascii=False),
+        spec_fingerprint=spec_fingerprint, physical_fingerprint=physical_fingerprint,
+        plan_json=json.dumps(response, ensure_ascii=False), status="PREVIEWED" if response["status"] in {"READY", "REVIEW_REQUIRED"} else response["status"],
+        created_by=actor.email or actor.name)
+    session.add(record)
+    session.commit()
+    response["plan_id"] = record.id
+    response["spec_fingerprint"] = spec_fingerprint
+    response["physical_fingerprint"] = physical_fingerprint
+    return response
+
+
+@app.post("/api/metadata/registered/datalake-migrations/apply-empty")
+def apply_empty_datalake_migration(payload: DatalakeSchemaMigrationApplyIn, confirm: bool = Query(False), session: Session = Depends(get_session), actor: User = Depends(require("metadata:write"))):
+    if not confirm:
+        raise HTTPException(400, "빈 테이블 구조 변경은 confirm=true 확인이 필요합니다.")
+    plan = session.get(DatalakeSchemaMigration, payload.plan_id)
+    if not plan:
+        raise HTTPException(404, "구조 변경 계획을 찾을 수 없습니다.")
+    if plan.status == "APPLIED_EMPTY":
+        return {"plan_id": plan.id, "status": "already_applied", "idempotent": True}
+    if plan.status != "PREVIEWED":
+        raise HTTPException(409, f"현재 상태({plan.status})에서는 적용할 수 없습니다.")
+    preview = json.loads(plan.plan_json)
+    if preview.get("route") != "APPLY_EMPTY" or preview.get("status") != "READY":
+        raise HTTPException(409, "양쪽 테이블의 비어 있음과 안전한 변경이 확인된 계획만 적용할 수 있습니다.")
+    identity = RegisteredTableIdentity.model_validate(json.loads(plan.identity_json))
+    target = target_status(session)
+    if not target.get("configured") or target.get("target_type") != "postgresql":
+        raise HTTPException(409, "현재 활성 Target이 PostgreSQL이 아닙니다.")
+    try:
+        spec = _registered_table_spec(session, identity)
+        spec_fingerprint = table_spec_fingerprint(spec)
+        if spec_fingerprint != plan.spec_fingerprint:
+            raise HTTPException(409, "PLAN_STALE: 메타가 변경되어 최신 구조 변경 계획을 다시 만들어야 합니다.")
+        ddl = render_postgresql_ddl(spec, include_procedure=False)
+        plan_key = hashlib.sha256(f"{plan.id}:{plan.created_at.isoformat()}:{plan.spec_fingerprint}".encode()).hexdigest()
+        result = apply_empty_postgresql_migration(
+            st_schema=spec.st_schema, st_table=spec.st_table, l0_schema=spec.l0_schema, l0_table=spec.l0_table,
+            desired_columns=table_layout_columns(spec), desired_pk_columns=list(spec.pk_columns), ddl=ddl, plan_key=plan_key,
+            expected_physical_fingerprint=plan.physical_fingerprint, expected_spec_fingerprint=plan.spec_fingerprint,
+        )
+        plan.status = "APPLIED_EMPTY"
+        plan.applied_by = actor.email or actor.name
+        plan.applied_at = datetime.now(timezone.utc)
+        session.commit()
+        return {"plan_id": plan.id, "actor": plan.applied_by, **result}
+    except HTTPException:
+        session.rollback()
+        raise
+    except ValueError as error:
+        session.rollback()
+        message = str(error)
+        status_code = 409 if message.startswith(("PLAN_STALE", "BLOCKED", "PLAN_KEY_CONFLICT")) else 422
+        raise HTTPException(status_code, message) from error
+    except Exception as error:
+        session.rollback()
+        raise HTTPException(502, "빈 테이블 구조 변경이 실패했습니다. 데이터 대상 트랜잭션은 롤백되었습니다.") from error
 
 
 @app.post("/api/metadata/registered/datalake-plan")
@@ -2260,7 +2413,7 @@ def apply_datalake_plan(payload: RegisteredDatalakePlanApplyIn, confirm: bool = 
         current_spec_fingerprint = table_spec_fingerprint(spec)
         if current_spec_fingerprint != payload.spec_fingerprint:
             raise HTTPException(409, "PLAN_STALE: 저장된 메타가 계획 생성 후 변경되었습니다. 최신 계획을 다시 확인하세요.")
-        ddl = render_postgresql_ddl(spec)
+        ddl = render_postgresql_ddl(spec, include_procedure=False)
         ddl_fingerprint = hashlib.sha256(ddl.encode("utf-8")).hexdigest()
         if payload.ddl_fingerprint and ddl_fingerprint != payload.ddl_fingerprint:
             raise HTTPException(409, "PLAN_STALE: 생성 DDL이 계획과 일치하지 않습니다. 최신 계획을 다시 확인하세요.")
@@ -2273,7 +2426,7 @@ def apply_datalake_plan(payload: RegisteredDatalakePlanApplyIn, confirm: bool = 
         raise HTTPException(422, str(error)) from error
     except Exception as error:
         logger.exception("registered datalake plan apply failed: %s.%s.%s", identity.owner, identity.table_name, getattr(spec, "strategy", "unknown"))
-        raise HTTPException(502, f"ST/L0 및 L0 저장 프로시저 적용에 실패했습니다. {explain_postgresql_error(error)}") from error
+        raise HTTPException(502, f"ST/L0 테이블 생성에 실패했습니다. {explain_postgresql_error(error)}") from error
     return {**result, "actor": actor.email, "strategy": spec.strategy, "procedure_name": spec.procedure_name, "fingerprint": hashlib.sha256(ddl.encode("utf-8")).hexdigest()}
 
 
@@ -2818,7 +2971,8 @@ def apply_layout_change(change_id: int, session: Session = Depends(get_session),
         table.is_active = "N" if change.change_type in {"TABLE_REMOVED", "VIEW_REMOVED"} else "Y"
         table.last_layout_snapshot_id = change.after_snapshot_id
         table.last_layout_changed_at = datetime.now(timezone.utc)
-        table.metadata_sync_status = "APPLIED"
+        table.metadata_sync_status = "DATALAKE_PENDING"
+        table.metadata_sync_message = "메타 반영 완료 · Datalake 물리 구조 반영 대기"
         if change.object_type == "COLUMN" and change.column_name:
             column = session.scalar(select(MetaColumnExt).where(MetaColumnExt.system_cd == table.system_cd, MetaColumnExt.instance_name == table.instance_name, MetaColumnExt.postfix == table.postfix, MetaColumnExt.owner == table.owner, MetaColumnExt.table_name == table.table_name, MetaColumnExt.column_name == change.column_name))
             if change.change_type == "COLUMN_REMOVED" and column:
@@ -2826,16 +2980,8 @@ def apply_layout_change(change_id: int, session: Session = Depends(get_session),
             elif change.change_type == "COLUMN_ADDED" and not column:
                 column = MetaColumnExt(system_cd=table.system_cd, instance_name=table.instance_name, postfix=table.postfix, owner=table.owner, table_name=table.table_name, column_name=change.column_name, src_column_name=change.column_name, tgt_column_name=change.column_name, src_snapshot_id=change.after_snapshot_id, column_status="ACTIVE", column_change_yn="N", metadata_sync_status="APPLIED", is_active="Y", createdon=datetime.now(timezone.utc), createdby=user.email or user.name)
                 session.add(column)
-            if column and after:
-                column.data_type = str(after.get("type") or column.data_type)
-                column.data_length = after.get("length") or column.data_length
-                column.data_precision = after.get("precision") or column.data_precision
-                column.data_scale = after.get("scale") or column.data_scale
-                if "nullable" in after: column.null_yn = "N" if after.get("nullable") is False else "Y"
-                if "comment" in after: column.comments = after.get("comment")
-                column.column_status = "ACTIVE"; column.is_active = "Y"
             if column:
-                column.column_change_yn = "N"; column.column_change_type = change.change_type; column.metadata_sync_status = "APPLIED"; column.last_layout_snapshot_id = change.after_snapshot_id
+                apply_column_metadata_change(column, after, change.change_type, change.after_snapshot_id)
     change.status = "APPLIED"
     change.applied_by = user.email or user.name
     change.applied_at = datetime.now(timezone.utc)

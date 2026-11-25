@@ -19,6 +19,95 @@ def _metadata(**overrides):
     return payload
 
 
+def test_datalake_plan_fingerprint_matches_table_only_apply_ddl(monkeypatch):
+    import hashlib
+
+    import app.main as main
+    from sqlalchemy.orm import Session as SqlSession
+    from typing import cast
+    from app.schemas import RegisteredTableIdentity
+
+    spec = build_table_spec(_metadata())
+
+    class Session:
+        def get(self, *_args):
+            return None
+
+    monkeypatch.setattr(main, "_registered_table_spec", lambda _session, _identity: spec)
+    identity = RegisteredTableIdentity(
+        system_cd="TEST",
+        instance_name="TEST_INSTANCE",
+        postfix="",
+        owner="PUBLIC",
+        table_name="CUSTOMERS",
+    )
+
+    plan = main.create_datalake_plan(identity, cast(SqlSession, Session()))
+    apply_ddl = render_postgresql_ddl(spec, include_procedure=False)
+    apply_fingerprint = hashlib.sha256(apply_ddl.encode("utf-8")).hexdigest()
+
+    assert plan["ddl"] == apply_ddl
+    assert "CREATE OR REPLACE PROCEDURE" not in plan["ddl"].upper()
+    assert plan["ddl_fingerprint"] == apply_fingerprint
+
+
+def test_datalake_plan_apply_executes_table_ddl_only(monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    import app.main as main
+    from sqlalchemy.orm import Session as SqlSession
+    from app.schemas import RegisteredDatalakePlanApplyIn
+
+    spec = build_table_spec(_metadata())
+    table_ddl = render_postgresql_ddl(spec, include_procedure=False)
+    applied = []
+
+    class Session:
+        pass
+
+    monkeypatch.setattr(main, "target_status", lambda _session: {"configured": True, "target_type": "postgresql"})
+    monkeypatch.setattr(main, "_registered_table_spec", lambda _session, _identity: spec)
+    monkeypatch.setattr(main, "apply_postgresql_ddl", lambda ddl: applied.append(ddl) or {"status": "applied"})
+    payload = RegisteredDatalakePlanApplyIn(
+        system_cd="TEST",
+        instance_name="TEST_INSTANCE",
+        postfix="",
+        owner="PUBLIC",
+        table_name="CUSTOMERS",
+        spec_fingerprint=table_spec_fingerprint(spec),
+        ddl_fingerprint=hashlib.sha256(table_ddl.encode("utf-8")).hexdigest(),
+    )
+
+    result = main.apply_datalake_plan(
+        payload,
+        confirm=True,
+        session=cast(SqlSession, Session()),
+        actor=cast(Any, SimpleNamespace(email="tester@example.invalid")),
+    )
+
+    assert applied == [table_ddl]
+    assert "CREATE OR REPLACE PROCEDURE" not in applied[0].upper()
+    assert result["status"] == "applied"
+
+
+def test_standard_partition_and_load_timestamp_columns_are_first_in_st_and_l0():
+    import re
+
+    ddl = render_postgresql_ddl(build_table_spec(_metadata()))
+
+    for schema in ("ST_TEST", "L0_TEST"):
+        match = re.search(
+            rf'CREATE TABLE IF NOT EXISTS "{schema}"\."CUSTOMERS" \(\n(?P<columns>.*?)\n\);',
+            ddl,
+            re.DOTALL,
+        )
+        assert match is not None
+        names = re.findall(r'^  "([A-Z0-9_]+)" ', match.group("columns"), re.MULTILINE)
+        assert names[:2] == ["P_PTT", "ETL_LOAD_TS"]
+
+
 def test_build_table_spec_derives_st_l0_and_procedure_from_one_spec():
     spec = build_table_spec(_metadata())
 
