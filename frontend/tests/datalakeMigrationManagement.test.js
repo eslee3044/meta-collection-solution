@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   buildMigrationManagementRows,
+  canCloseMigrationModalOnEscape,
+  getMigrationNeededRows,
   getMigrationStatusTargets,
   migrationIdentityKey,
 } from '../src/datalakeMigrationManagement.js'
@@ -15,7 +17,7 @@ const table = (overrides = {}) => ({
   ...overrides,
 })
 
-test('status checks are requested only for tables with both physical targets', () => {
+test('status checks include registered tables with partial or missing physical targets', () => {
   const tables = [table(), table({ table_name: 'ST_ONLY' }), table({ table_name: 'NO_ST' })]
   const physicalStatuses = {
     [migrationIdentityKey(tables[0])]: { st_table_exists: true, table_exists: true },
@@ -23,7 +25,7 @@ test('status checks are requested only for tables with both physical targets', (
     [migrationIdentityKey(tables[2])]: { st_table_exists: false, table_exists: false },
   }
 
-  assert.deepEqual(getMigrationStatusTargets(tables, physicalStatuses), [tables[0]])
+  assert.deepEqual(getMigrationStatusTargets(tables, physicalStatuses), tables)
 })
 
 test('management rows combine physical and migration state without losing table identity', () => {
@@ -40,6 +42,24 @@ test('management rows combine physical and migration state without losing table 
     { table: registered[0], key: migrationIdentityKey(registered[0]), physical: statuses[migrationIdentityKey(registered[0])], migration: migrations[migrationIdentityKey(registered[0])], state: 'NEEDS_MIGRATION' },
     { table: registered[1], key: migrationIdentityKey(registered[1]), physical: statuses[migrationIdentityKey(registered[1])], migration: null, state: 'CREATE_REQUIRED' },
   ])
+})
+
+test('the management list contains only migration-needed tables and searches within that set', () => {
+  const needsChange = { table: table({ table_name: 'Customer_Archive' }), state: 'NEEDS_MIGRATION' }
+  const current = { table: table({ table_name: 'Customer_Current' }), state: 'CURRENT' }
+  const blocked = { table: table({ table_name: 'Customer_Blocked' }), state: 'CHECK_FAILED' }
+  const rows = [needsChange, current, blocked]
+
+  assert.deepEqual(getMigrationNeededRows(rows), [needsChange, blocked])
+  assert.deepEqual(getMigrationNeededRows(rows, 'archive'), [needsChange])
+  assert.deepEqual(getMigrationNeededRows(rows, 'current'), [])
+  assert.deepEqual(getMigrationNeededRows([{ ...needsChange, table: table({ postfix: 'P2026' }) }], 'p2026'), [{ ...needsChange, table: table({ postfix: 'P2026' }) }])
+})
+
+test('Escape closes a migration dialog only when it is idle and not awaiting confirmation', () => {
+  assert.equal(canCloseMigrationModalOnEscape({ busy: false, confirming: false }), true)
+  assert.equal(canCloseMigrationModalOnEscape({ busy: true, confirming: false }), false)
+  assert.equal(canCloseMigrationModalOnEscape({ busy: false, confirming: true }), false)
 })
 
 test('unknown physical inspection is not mislabeled as a missing table', () => {

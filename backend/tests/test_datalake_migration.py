@@ -5,6 +5,7 @@ import pytest
 from app.datalake_ddl import build_table_spec
 from app.datalake_migration import (
     apply_column_metadata_change,
+    build_layout_work_status,
     classify_target_state,
     compare_table_layouts,
 )
@@ -29,6 +30,31 @@ def _column(**updates):
     fields.update(updates)
     return SimpleNamespace(**fields)
 
+
+def test_layout_work_status_separates_metadata_apply_from_datalake_next_action():
+    result = build_layout_work_status(
+        metadata_status="APPLIED",
+        metadata_message="메타 반영 완료 · Datalake 물리 구조 반영 대기",
+        migration={"status": "REVIEW_REQUIRED", "route": "TOBE_REQUIRED", "reason": "데이터 있음"},
+    )
+    assert result == {
+        "metadata_status": "APPLIED",
+        "physical_status": "TO_BE_REQUIRED",
+        "load_status": "PAUSED",
+        "next_action": "TOBE_REQUIRED",
+        "message": "데이터 있음",
+    }
+
+
+def test_layout_work_status_allows_empty_apply_but_does_not_resume_load():
+    result = build_layout_work_status(
+        metadata_status="APPLIED",
+        metadata_message="메타 반영 완료",
+        migration={"status": "READY", "route": "APPLY_EMPTY", "reason": "양쪽 테이블이 비어 있습니다."},
+    )
+    assert result["physical_status"] == "APPLY_EMPTY"
+    assert result["load_status"] == "PAUSED"
+    assert result["next_action"] == "APPLY_EMPTY"
 
 def test_classify_missing_pair_as_create_new():
     result = classify_target_state(st_exists=False, l0_exists=False, st_rows=None, l0_rows=None)

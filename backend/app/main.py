@@ -25,7 +25,7 @@ from .excel_export import build_schema_workbook, build_sources_workbook
 from .integration import ensure_integration_views, snapshot_diff, snapshot_summary
 from .datalake import datalake_root
 from .datalake_ddl import build_table_spec, render_postgresql_ddl, render_postgresql_procedure_scripts, table_layout_columns, table_spec_fingerprint
-from .datalake_migration import apply_column_metadata_change, build_migration_status, classify_target_state, compare_table_layouts
+from .datalake_migration import apply_column_metadata_change, build_layout_work_status, build_migration_status, classify_target_state, compare_table_layouts
 from .datalake_query import DatalakeTableNotFound, list_l0_tables, preview_l0_table
 from .datalake_postgres import apply_empty_postgresql_migration, apply_postgresql_ddl, explain_postgresql_error, inspect_postgresql_objects, inspect_postgresql_migration_pair
 from .load_service import run_full_load
@@ -2148,7 +2148,7 @@ def _migration_physical_fingerprint(inspection: dict[str, Any]) -> str:
 
 
 @app.post("/api/metadata/registered/datalake-migrations/status")
-def datalake_schema_migration_status(identity: RegisteredTableIdentity, session: Session = Depends(get_session), _: User = Depends(require("metadata:read"))):
+def datalake_schema_migration_status(identity: RegisteredTableIdentity, session: Session = Depends(get_session), actor: User = Depends(require("metadata:read"))):
     """Read-only comparison used to show the migration action only when needed."""
     target = target_status(session)
     if not target.get("configured") or target.get("target_type") != "postgresql":
@@ -2841,7 +2841,7 @@ def _layout_change_fingerprint(item: dict, before_snapshot_id: int, after_snapsh
 def _persist_layout_changes(session: Session, before: SchemaSnapshot, after: SchemaSnapshot, diff: dict[str, Any]) -> int:
     # 구조 변경 알람은 현재 등록된 메타 테이블에 대해서만 생성한다.
     source_name = (after.payload or {}).get("source") or (before.payload or {}).get("source")
-    registered_targets = set(session.execute(select(MetaTableExt.owner, MetaTableExt.table_name).where(MetaTableExt.instance_name == source_name)).all())
+    registered_targets = {(owner, table): (system_cd, postfix or "") for owner, table, system_cd, postfix in session.execute(select(MetaTableExt.owner, MetaTableExt.table_name, MetaTableExt.system_cd, MetaTableExt.postfix).where(MetaTableExt.instance_name == source_name)).all()}
     # A skipped schema means absence cannot safely be interpreted as a deletion.
     skipped = {(item.get("name") if isinstance(item, dict) else str(item)) for item in ((after.payload or {}).get("skipped_schemas") or [])}
     persisted = 0
@@ -2853,6 +2853,7 @@ def _persist_layout_changes(session: Session, before: SchemaSnapshot, after: Sch
         target_table = item.get("table") or (item.get("name") if kind in {"table", "view"} else None)
         if not target_table or (item.get("schema"), target_table) not in registered_targets:
             continue
+        system_cd, postfix = registered_targets[(item.get("schema"), target_table)]
         change_type, risk = _layout_change_type(kind, item.get("before"), item.get("after") or item.get("value"), added, removed)
         if not change_type:
             continue
@@ -2872,8 +2873,9 @@ def _persist_layout_changes(session: Session, before: SchemaSnapshot, after: Sch
         if session.scalar(select(MetaLayoutChange).where(MetaLayoutChange.change_fingerprint == fingerprint)):
             continue
         change = MetaLayoutChange(
-            system_cd=None,
+            system_cd=system_cd,
             instance_name=(after.payload or {}).get("source"),
+            postfix=postfix,
             owner=item.get("schema"),
             table_name=item.get("table") or (item.get("name") if kind in {"table", "view"} else None),
             object_type="COLUMN" if kind == "column" else kind.upper(),
@@ -2914,7 +2916,7 @@ def list_layout_changes(
         query = query.where(MetaLayoutChange.risk_level == risk_level.upper())
     total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
     rows = session.scalars(query.order_by(desc(MetaLayoutChange.detected_at), desc(MetaLayoutChange.id)).offset((page - 1) * page_size).limit(page_size)).all()
-    return {"items": [{"change_id": row.id, "instance_name": row.instance_name, "owner": row.owner, "table_name": row.table_name, "object_type": row.object_type, "column_name": row.column_name, "change_type": row.change_type, "risk_level": row.risk_level, "status": row.status, "before": json.loads(row.before_value) if row.before_value else None, "after": json.loads(row.after_value) if row.after_value else None, "before_snapshot_id": row.before_snapshot_id, "after_snapshot_id": row.after_snapshot_id, "detected_at": row.detected_at} for row in rows], "total": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size}
+    return {"items": [{"change_id": row.id, "system_cd": row.system_cd, "instance_name": row.instance_name, "postfix": row.postfix, "owner": row.owner, "table_name": row.table_name, "object_type": row.object_type, "column_name": row.column_name, "change_type": row.change_type, "risk_level": row.risk_level, "status": row.status, "before": json.loads(row.before_value) if row.before_value else None, "after": json.loads(row.after_value) if row.after_value else None, "before_snapshot_id": row.before_snapshot_id, "after_snapshot_id": row.after_snapshot_id, "detected_at": row.detected_at} for row in rows], "total": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size}
 
 
 @app.post("/api/metadata/layout-changes/{change_id}/approve")
@@ -2987,7 +2989,51 @@ def apply_layout_change(change_id: int, session: Session = Depends(get_session),
     change.applied_at = datetime.now(timezone.utc)
     session.add(MetaLayoutChangeAction(change_id=change.id, action_type="APPLIED", actor=user.email or user.name))
     session.commit()
-    return {"status": change.status, "change_id": change.id}
+    return {
+        "status": change.status,
+        "change_id": change.id,
+        "work_id": f"layout-change:{change.id}",
+        "identity": {"system_cd": change.system_cd, "instance_name": change.instance_name, "postfix": change.postfix or "", "owner": change.owner, "table_name": change.table_name},
+        "metadata_status": "APPLIED",
+        "physical_status": "PENDING",
+        "load_status": "PAUSED",
+        "next_action": "RECHECK",
+        "message": "메타 반영 완료 · Datalake 구조를 확인해야 합니다.",
+    }
+
+
+@app.get("/api/metadata/layout-changes/{change_id}/datalake-work")
+def layout_change_datalake_work(change_id: int, session: Session = Depends(get_session), actor: User = Depends(require("metadata:read"))):
+    change = session.get(MetaLayoutChange, change_id)
+    if not change:
+        raise HTTPException(404, "메타 변경 내역을 찾을 수 없습니다.")
+    if change.status != "APPLIED":
+        return {
+            "work_id": f"layout-change:{change.id}",
+            "change_id": change.id,
+            "metadata_status": change.status,
+            "physical_status": "NOT_READY",
+            "load_status": "NOT_READY",
+            "next_action": "APPLY_METADATA",
+            "message": "먼저 승인된 메타 변경을 반영해야 합니다.",
+        }
+    if not change.system_cd or not change.instance_name or not change.owner or not change.table_name:
+        raise HTTPException(409, "등록 메타와 연결할 수 없는 변경입니다.")
+    identity = RegisteredTableIdentity(
+        system_cd=change.system_cd or "",
+        instance_name=change.instance_name or "",
+        postfix=change.postfix or "",
+        owner=change.owner or "",
+        table_name=change.table_name or "",
+    )
+    migration = datalake_schema_migration_status(identity, session, actor)
+    work = build_layout_work_status(
+        metadata_status=change.status,
+        metadata_message="메타 반영 완료 · Datalake 물리 구조 반영 대기",
+        migration=migration,
+    )
+    return {"work_id": f"layout-change:{change.id}", "change_id": change.id, "identity": identity.model_dump(), **work, "migration": migration}
+
 
 
 @app.get("/api/metadata/sources/{source_id}/diff")

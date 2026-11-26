@@ -109,6 +109,37 @@ def build_migration_status(*, identity: dict[str, Any], strategy: str, desired_p
             "changed": changed, "needs_migration": changed}
 
 
+def build_layout_work_status(*, metadata_status: str, metadata_message: str | None, migration: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep metadata application, physical migration, and load resume state distinct."""
+    migration = migration or {}
+    route = migration.get("route")
+    if route == "APPLY_EMPTY":
+        physical_status = "APPLY_EMPTY"
+        next_action = "APPLY_EMPTY"
+    elif route == "TOBE_REQUIRED":
+        physical_status = "TO_BE_REQUIRED"
+        next_action = "TOBE_REQUIRED"
+    elif route == "CREATE_NEW":
+        physical_status = "CREATE_REQUIRED"
+        next_action = "CREATE_NEW"
+    elif route == "NO_CHANGE":
+        physical_status = "CURRENT"
+        next_action = "RECHECK_LOAD"
+    elif route == "BLOCKED" or migration.get("status") in {"BLOCKED", "UNKNOWN", "UNAVAILABLE"}:
+        physical_status = "BLOCKED"
+        next_action = "RECHECK"
+    else:
+        physical_status = "PENDING"
+        next_action = "RECHECK"
+    return {
+        "metadata_status": metadata_status,
+        "physical_status": physical_status,
+        "load_status": "PAUSED" if metadata_status == "APPLIED" else "NOT_READY",
+        "next_action": next_action,
+        "message": migration.get("reason") or metadata_message or "메타 변경 후 Datalake 구조 확인이 필요합니다.",
+    }
+
+
 def apply_column_metadata_change(column: Any, after: dict[str, Any], change_type: str, snapshot_id: int | None) -> None:
     """Apply an approved source snapshot to registered metadata, never to Datalake.
 
