@@ -3,9 +3,13 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
+from datetime import datetime
+from http.client import HTTPException as HTTPTransportError
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from fastapi import HTTPException
@@ -23,7 +27,7 @@ def runtime_names(source_name: str) -> tuple[str, str]:
     return f"{key}_conn", f"{key}_pool"
 
 
-def _request(method: str, path: str, payload: dict[str, Any] | None = None) -> tuple[int, dict[str, Any] | None]:
+def _request(method: str, path: str, payload: dict[str, Any] | None = None, *, timeout: float = 10) -> tuple[int, dict[str, Any] | None]:
     settings = get_settings()
     if not settings.airflow_username or not settings.airflow_password:
         raise HTTPException(status_code=503, detail="Airflow 자동 준비 설정이 없습니다. 관리자에게 Airflow API 설정을 요청하세요.")
@@ -33,7 +37,7 @@ def _request(method: str, path: str, payload: dict[str, Any] | None = None) -> t
     headers["Authorization"] = f"Basic {token}"
     request = Request(url, data=json.dumps(payload).encode() if payload is not None else None, headers=headers, method=method)
     try:
-        with urlopen(request, timeout=10) as response:
+        with urlopen(request, timeout=timeout) as response:
             raw = response.read().decode()
             return response.status, json.loads(raw) if raw else None
     except HTTPError as exc:
@@ -121,6 +125,43 @@ def list_dag_runs(dag_id: str, *, limit: int = 5) -> list[dict[str, Any]]:
     if status != 200 or not response:
         raise HTTPException(status_code=502, detail="Airflow DAG 실행 상태를 조회하지 못했습니다.")
     return response.get("dag_runs", [])
+
+
+def dashboard_latest_dag_run(dag_id: str, *, timeout: float) -> dict[str, Any] | None:
+    status, response = _request("GET", f"dags/{quote(dag_id, safe='')}/dagRuns?limit=1&order_by=-execution_date", timeout=timeout)
+    runs = response.get("dag_runs") if isinstance(response, dict) else None
+    if status != 200 or not isinstance(runs, list) or (runs and not isinstance(runs[0], dict)):
+        raise HTTPException(502, "Airflow DAG 실행 상태를 조회하지 못했습니다.")
+    return runs[0] if runs else None
+
+
+def dashboard_successful_runs(dag_ids: tuple[str, ...], start: datetime, end: datetime) -> list[dict[str, Any]]:
+    if not dag_ids:
+        return []
+    deadline = time.monotonic() + 4
+    result: list[dict[str, Any]] = []
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            status, body = _request("POST", "dags/~/dagRuns/list", {
+                "dag_ids": list(dag_ids), "states": ["success"],
+                "end_date_gte": start.isoformat(), "end_date_lte": end.isoformat(),
+                "order_by": "id", "page_offset": len(result), "page_limit": 100,
+            }, timeout=remaining)
+        except (HTTPTransportError, OSError) as exc:
+            raise HTTPException(502, "Airflow 적재 이력을 모두 확인하지 못했습니다.") from exc
+        rows = body.get("dag_runs") if isinstance(body, dict) else None
+        total = body.get("total_entries") if isinstance(body, dict) else None
+        if status != 200 or not isinstance(rows, list) or not isinstance(total, int) or total < 0:
+            break
+        result.extend(rows)
+        if len(result) == total:
+            return result
+        if not rows or len(result) > total:
+            break
+    raise HTTPException(502, "Airflow 적재 이력을 모두 확인하지 못했습니다.")
 
 
 def prepare_source_runtime(*, source: Any, credential_mode: str, dedicated_username: str | None, dedicated_password: str | None, pool_slots: int, confirm_pool_resize: bool) -> dict[str, Any]:

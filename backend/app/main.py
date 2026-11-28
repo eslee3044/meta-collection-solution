@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager, nullcontext
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -6,6 +7,7 @@ import re
 import secrets
 import hashlib
 import logging
+from time import monotonic
 from urllib.parse import quote
 from pathlib import Path
 from typing import Any
@@ -14,7 +16,7 @@ import yaml
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from sqlalchemy import MetaData, Table, and_, delete, desc, func, inspect, or_, select, text, update
+from sqlalchemy import MetaData, Table, and_, case, delete, desc, func, inspect, or_, select, text, update
 from sqlalchemy.exc import NoSuchTableError
 from sqlalchemy.orm import Session
 
@@ -30,7 +32,7 @@ from .datalake_query import DatalakeTableNotFound, list_l0_tables, preview_l0_ta
 from .datalake_postgres import apply_empty_postgresql_migration, apply_postgresql_ddl, explain_postgresql_error, inspect_postgresql_objects, inspect_postgresql_migration_pair
 from .load_service import run_full_load
 from .load_operations import build_chunks, build_manifest, normalize_plan_input, plan_fingerprint, recommend_load_design
-from .airflow_control import get_dag, list_dag_runs, list_dag_task_instances, prepare_source_runtime, preflight as airflow_preflight, set_dag_paused, trigger_dag
+from .airflow_control import dashboard_latest_dag_run, dashboard_successful_runs, get_dag, list_dag_runs, list_dag_task_instances, prepare_source_runtime, preflight as airflow_preflight, set_dag_paused, trigger_dag
 from .orchestration_mode import validate_mode_change
 from .airflow_dag_factory import render_dag_source
 from .models import CollectionJob, CollectionRun, DataSource, DatalakeTarget, DatalakeSchemaMigration, DatalakeOrchestrationConfig, DatalakeLoadPlan, DatalakeLoadChunk, DatalakeLoadDag, Menu, MetaColumnExt, MetaLayoutChange, MetaLayoutChangeAction, MetaPkCandidate, MetaTableConfig, MetaTableExt, Permission, Role, RunLog, SchemaSnapshot, User, utcnow
@@ -280,12 +282,174 @@ def change_password(payload: PasswordChangeIn, session: Session = Depends(get_se
     return {"status": "changed"}
 
 
+_dashboard_run_cache: tuple[tuple[str, ...], float, str, dict[str, dict[str, Any]] | None] | None = None
+_DASHBOARD_ACTIVITY_PRIORITIES = (
+    ("failed", "upstream_failed"),
+    ("running",),
+    ("queued", "undeployed", "schedule_pending_deployment"),
+)
+_DASHBOARD_ACTIVITY_LIMIT = 8
+
+
+def _dashboard_timestamp(value: object) -> datetime | None:
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _dashboard_activity_preview(activity: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def sort_key(item):
+        status = item["status"].lower()
+        priority = next((index for index, states in enumerate(_DASHBOARD_ACTIVITY_PRIORITIES) if status in states), len(_DASHBOARD_ACTIVITY_PRIORITIES))
+        timestamp = item["updated_at"]
+        return (priority, -timestamp.timestamp() if timestamp else float("inf"), item["target"], item["activity_type"])
+
+    return sorted(activity, key=sort_key)[:_DASHBOARD_ACTIVITY_LIMIT]
+
+
+def _dashboard_collection_activity(session: Session) -> list[dict[str, Any]]:
+    event_at = func.coalesce(CollectionRun.finished_at, CollectionRun.started_at)
+    priority = case(
+        *((CollectionRun.status.in_(states), index) for index, states in enumerate(_DASHBOARD_ACTIVITY_PRIORITIES)),
+        else_=len(_DASHBOARD_ACTIVITY_PRIORITIES),
+    )
+    rows = session.execute(
+        select(CollectionJob.name, CollectionRun.status, event_at)
+        .join_from(CollectionRun, CollectionJob)
+        .order_by(priority, event_at.desc(), CollectionJob.name, CollectionRun.id.desc())
+        .limit(_DASHBOARD_ACTIVITY_LIMIT)
+    )
+    return [
+        {"source": "metadata", "activity_type": "collection", "target": name,
+         "status": status, "updated_at": _dashboard_timestamp(updated_at)}
+        for name, status, updated_at in rows
+    ]
+
+
+def _dashboard_latest_runs(dag_ids: tuple[str, ...]) -> tuple[str, dict[str, dict[str, Any]] | None]:
+    global _dashboard_run_cache
+    now = monotonic()
+    cached = _dashboard_run_cache
+    if cached and cached[0] == dag_ids and now < cached[1]:
+        return cached[2], cached[3]
+
+    deadline = now + 3
+    runs: dict[str, dict[str, Any]] | None = {}
+    try:
+        for dag_id in dag_ids:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            latest = dashboard_latest_dag_run(dag_id, timeout=remaining)
+            if latest is not None:
+                runs[dag_id] = latest
+    except Exception:
+        # Never expose partial totals or upstream error details.
+        runs = None
+
+    checked_at = datetime.now(timezone.utc).isoformat()
+    _dashboard_run_cache = (dag_ids, monotonic() + 15, checked_at, runs)
+    return checked_at, runs
+
+
+def _dashboard_operations_summary(session: Session) -> dict[str, Any]:
+    """Build a safe, small operations summary for the dashboard."""
+    config = _orchestration_config(session)
+    dags = session.execute(select(
+        DatalakeLoadDag.dag_id, DatalakeLoadDag.dag_type, DatalakeLoadDag.plan_id,
+        DatalakeLoadDag.status, DatalakeLoadDag.updated_at,
+    )).all()
+    deployed = [dag for dag in dags if dag.status == "DEPLOYED"]
+    incremental_deployed = {dag.plan_id for dag in deployed if dag.dag_type == "INCREMENTAL"}
+    initial_status_counts: Counter[str] = Counter()
+    incremental_status_counts: Counter[str] = Counter()
+    for plan_id, initial, incremental in session.execute(select(
+        DatalakeLoadPlan.id, DatalakeLoadPlan.initial_status, DatalakeLoadPlan.incremental_status,
+    )):
+        initial_status_counts[initial] += 1
+        if incremental == "SCHEDULE_ACTIVE" and plan_id not in incremental_deployed:
+            incremental = "SCHEDULE_PENDING_DEPLOYMENT"
+        incremental_status_counts[incremental] += 1
+    orchestration: dict[str, Any] = {
+        "mode": config.mode,
+        "timezone": config.timezone,
+        "airflow_status": "NOT_APPLICABLE" if config.mode == "MANIFEST_ONLY" else "UNKNOWN",
+        "checked_at": None,
+    }
+    run_status = "NOT_APPLICABLE" if config.mode == "MANIFEST_ONLY" else "NO_DAGS"
+    running_or_queued = failed = None
+    recent_activity: list[dict[str, Any]] = []
+    plans = session.scalars(select(DatalakeLoadPlan).order_by(desc(DatalakeLoadPlan.updated_at), DatalakeLoadPlan.id).limit(_DASHBOARD_ACTIVITY_LIMIT)).all()
+    for plan in plans:
+        recent_activity.append({
+            "source": "datalake", "activity_type": "load_plan", "target": f"{plan.system_cd}.{plan.table_name}",
+            "status": plan.status, "initial_status": plan.initial_status,
+            "incremental_status": plan.incremental_status, "updated_at": _dashboard_timestamp(plan.updated_at),
+        })
+    for dag in dags:
+        if dag.status != "DEPLOYED":
+            recent_activity.append({
+                "source": "datalake", "activity_type": "incremental_load" if dag.dag_type == "INCREMENTAL" else "initial_load",
+                "target": dag.dag_id, "status": "UNDEPLOYED", "updated_at": _dashboard_timestamp(dag.updated_at),
+            })
+    if config.mode == "AIRFLOW_MANAGED" and dags:
+        orchestration["checked_at"], latest_runs = _dashboard_latest_runs(tuple(sorted(dag.dag_id for dag in dags)))
+        orchestration["airflow_status"] = "UNAVAILABLE" if latest_runs is None else "AVAILABLE"
+        run_status = "UNAVAILABLE" if latest_runs is None else "AVAILABLE" if latest_runs else "NO_RUNS"
+        if latest_runs:
+            running_or_queued = failed = 0
+            for dag in dags:
+                latest = latest_runs.get(dag.dag_id)
+                if latest is None:
+                    continue
+                state = str(latest.get("state") or "").lower()
+                if state in {"queued", "running"}:
+                    running_or_queued += 1
+                elif state in {"failed", "upstream_failed"}:
+                    failed += 1
+                recent_activity.append({
+                    "source": "airflow", "activity_type": "incremental_load" if dag.dag_type == "INCREMENTAL" else "initial_load",
+                    "target": dag.dag_id, "status": state or "UNKNOWN",
+                    "updated_at": next((timestamp for field in ("end_date", "start_date", "execution_date", "logical_date", "queued_at")
+                                        if (timestamp := _dashboard_timestamp(latest.get(field))) is not None),
+                                       _dashboard_timestamp(dag.updated_at)),
+                })
+    return {
+        "orchestration": orchestration,
+        "datalake_summary": {
+            "plans_total": sum(initial_status_counts.values()),
+            "initial_status_counts": dict(initial_status_counts),
+            "incremental_status_counts": dict(incremental_status_counts),
+            "dags_total": len(dags),
+            "dags_deployed": len(deployed),
+            "init_dags_total": sum(dag.dag_type == "INIT" for dag in dags),
+            "init_dags_deployed": sum(dag.dag_type == "INIT" for dag in deployed),
+            "run_status": run_status,
+            "latest_running_or_queued_dags": running_or_queued,
+            "latest_failed_dags": failed,
+            "recent_activity": _dashboard_activity_preview(recent_activity),
+        },
+    }
+
+
 @app.get("/api/dashboard")
-def dashboard(session: Session = Depends(get_session), _: User = Depends(current_user)):
+def dashboard(session: Session = Depends(get_session), user: User = Depends(current_user)):
     latest = session.scalars(select(CollectionRun).order_by(desc(CollectionRun.started_at)).limit(8)).all()
     registered_layout_target = select(MetaTableExt.system_cd).where(MetaTableExt.instance_name == MetaLayoutChange.instance_name, MetaTableExt.owner == MetaLayoutChange.owner, MetaTableExt.table_name == MetaLayoutChange.table_name).exists()
     pending_layout_query = select(MetaLayoutChange).where(MetaLayoutChange.status.in_(["DETECTED", "REVIEW_REQUIRED", "APPROVED"]), registered_layout_target)
     pending_changes = session.scalars(pending_layout_query.order_by(desc(MetaLayoutChange.detected_at)).limit(5)).all()
+    activity = _dashboard_collection_activity(session)
+    operations = {}
+    if any(permission.code in {"jobs:read", "admin:*"} for role in user.roles for permission in role.permissions):
+        operations = _dashboard_operations_summary(session)
+        activity.extend(operations["datalake_summary"]["recent_activity"])
     return {
         "sources": session.scalar(select(func.count()).select_from(DataSource)) or 0,
         "active_jobs": session.scalar(select(func.count()).select_from(CollectionJob).where(CollectionJob.is_active.is_(True))) or 0,
@@ -294,15 +458,58 @@ def dashboard(session: Session = Depends(get_session), _: User = Depends(current
         "layout_changes_pending": session.scalar(select(func.count()).select_from(MetaLayoutChange).where(MetaLayoutChange.status.in_(["DETECTED", "REVIEW_REQUIRED", "APPROVED"]), registered_layout_target)) or 0,
         "recent_layout_changes": [{"change_id": item.id, "table_name": item.table_name, "column_name": item.column_name, "change_type": item.change_type, "risk_level": item.risk_level, "status": item.status, "detected_at": item.detected_at} for item in pending_changes],
         "recent_runs": [RunOut.model_validate(item) for item in latest],
+        "operations_activity": _dashboard_activity_preview(activity),
+        **operations,
     }
+
+
+def _dashboard_airflow_chart(session: Session, start: datetime, end: datetime, tz: timezone, user: User) -> dict[str, Any]:
+    result: dict[str, Any] = {"status": "FORBIDDEN", "daily": {}, "systems": []}
+    if not any(permission.code in {"jobs:read", "admin:*"} for role in user.roles for permission in role.permissions):
+        return result
+    if _orchestration_config(session).mode != "AIRFLOW_MANAGED":
+        return {**result, "status": "NOT_APPLICABLE"}
+    systems = {}
+    for dag_id, system_cd, manifest_json in session.execute(
+        select(DatalakeLoadDag.dag_id, DatalakeLoadPlan.system_cd, DatalakeLoadDag.manifest_json)
+        .join(DatalakeLoadPlan, DatalakeLoadDag.plan_id == DatalakeLoadPlan.id)
+    ):
+        try:
+            manifest = json.loads(manifest_json)
+        except (TypeError, ValueError):
+            continue
+        if (isinstance(manifest, dict)
+                and manifest.get("executor") in ("METAVAULT_API_FULL_LOAD", "METAVAULT_API_FULL_REFRESH")
+                and isinstance(manifest.get("tasks"), list)
+                and "load_chunks" in manifest["tasks"]):
+            systems[dag_id] = system_cd
+    daily: Counter[str] = Counter()
+    counts: Counter[str] = Counter()
+    try:
+        seen = set()
+        for row in dashboard_successful_runs(tuple(sorted(systems)), start, end):
+            finished = _dashboard_timestamp(row.get("end_date"))
+            dag_id, run_id = row.get("dag_id"), row.get("dag_run_id")
+            if finished is None or not isinstance(dag_id, str) or not isinstance(run_id, str):
+                raise ValueError("Invalid run record")
+            if dag_id not in systems or row.get("state") != "success" or not start <= finished < end or (dag_id, run_id) in seen:
+                continue
+            seen.add((dag_id, run_id))
+            daily[finished.astimezone(tz).date().isoformat()] += 1
+            counts[systems[dag_id]] += 1
+    except (HTTPException, ValueError, TypeError, AttributeError):
+        return {**result, "status": "UNAVAILABLE"}
+    return {"status": "AVAILABLE", "daily": dict(daily),
+            "systems": [{"name": name, "count": count} for name, count in counts.most_common()]}
 
 
 @app.get("/api/dashboard/collection-trend")
 def dashboard_collection_trend(
     days: int = Query(default=30, ge=7, le=90),
     selected_date: str | None = Query(default=None),
+    include_operations: bool = Query(default=False),
     session: Session = Depends(get_session),
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
 ):
     """Return daily table/view counts and the selected day's source breakdown."""
     kst = timezone(timedelta(hours=9))
@@ -364,7 +571,16 @@ def dashboard_collection_trend(
     )
     for item in breakdown:
         item["captured_at"] = item["captured_at"].isoformat()
-    return {"days": days, "from": first_date.isoformat(), "to": today.isoformat(), "selected_date": chosen_date.isoformat(), "trend": trend, "breakdown": breakdown}
+    result = {"days": days, "from": first_date.isoformat(), "to": today.isoformat(), "selected_date": chosen_date.isoformat(), "trend": trend, "breakdown": breakdown}
+    if include_operations:
+        counts: Counter[str] = Counter()
+        for item in latest_by_source_day.values():
+            if first_date.isoformat() <= item["date"] <= today.isoformat() and item["total_count"]:
+                counts[item["source_name"]] += item["total_count"]
+        end = datetime.combine(today + timedelta(days=1), datetime.min.time(), tzinfo=kst).astimezone(timezone.utc)
+        result["metadata_systems"] = [{"name": name, "count": count} for name, count in counts.most_common()]
+        result["airflow"] = _dashboard_airflow_chart(session, cutoff, end, kst, user)
+    return result
 
 
 def apply_source(item: DataSource, payload: DataSourceIn) -> None:
